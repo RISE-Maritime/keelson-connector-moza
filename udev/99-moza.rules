@@ -1,0 +1,5 @@
+# Moza wheelbases (vendor 346e): let the `input` group read the base and drive its force
+# feedback, and give the evdev node a stable name for docker-compose.moza.yml.
+# Install: sudo cp udev/99-moza.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="346e", MODE="0660", GROUP="input", SYMLINK+="moza-base"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="346e", MODE="0660", GROUP="input"

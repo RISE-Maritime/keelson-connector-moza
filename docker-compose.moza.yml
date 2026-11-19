@@ -1,0 +1,16 @@
+# A Moza wheelbase as the helm of <vessel_id>. Linux host only: the base is a USB device
+# the container reads through the kernel (hid-universal-pidff, kernel >= 6.15). Install
+# udev/99-moza.rules on the host first: it creates /dev/moza-base.
+services:
+  moza:
+    image: ghcr.io/rise-maritime/keelson-connector-moza:latest
+    container_name: moza
+    network_mode: host
+    # A replug creates a new device node, which a running container never sees: the
+    # connector exits 3 when the base goes away and the restart picks the new node up.
+    restart: unless-stopped
+    devices:
+      - /dev/moza-base:/dev/input/moza-base
+    group_add:
+      - input
+    command: "moza2keelson -r rise -e <vessel_id> -d /dev/input/moza-base --ffb follow-up --ffb-max-gain-pct 30"

@@ -1,0 +1,39 @@
+# Moza R21 Ultra (and R16 / R21: same USB ids, 346e:0000 and 346e:0010).
+#
+# Axis codes are the base's own evdev axes under hid-universal-pidff. Pedals plugged
+# into the base's pedal port appear on the base's device; pedals on their own USB cable
+# are a separate device this connector does not read. Confirm with `evtest` on your unit
+# (README, "First run") and copy this file to adjust.
+name: r21-ultra
+
+match:
+  vendor: 0x346e
+  # Kernel names look like "Gudsen MOZA R21 Ultra Base".
+  name_regex: "MOZA R\\d+"
+
+axes:
+  - code: ABS_X
+    subject: wheel_position_pct      # -100 port lock .. +100 starboard lock
+    input: wheel
+    range: bipolar
+    steering: true                   # the axis force feedback acts on
+    invert: false
+  - code: ABS_Z
+    subject: joystick_rt_pct         # 0 released .. 100 floored
+    input: throttle
+    range: unipolar
+    invert: false
+  - code: ABS_RZ
+    subject: joystick_lt_pct
+    input: brake
+    range: unipolar
+    invert: false
+  # The clutch (ABS_THROTTLE) has no helm meaning and is not published by default.
+
+buttons:
+  # Every key the base reports publishes on button_state_change, source
+  # <source-id>/<name>. The name is btn_<n>, n being the key's position in the
+  # device's own sorted key list; name the ones you use here.
+  names: {}
+  #   0: ptt
+  #   1: horn

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        run: uv sync --locked --extra dev --python 3.13
+      - name: Lint
+        run: uv run --locked ruff check .
+      - name: Unit tests
+        run: uv run --locked pytest -vv -m "not e2e"
+      # Loopback only, multicast scouting off: the e2e never reaches another network.
+      - name: End-to-end tests
+        run: uv run --locked pytest -vv -m e2e
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t keelson-connector-moza .
+      - name: Smoke test the entry point
+        run: docker run --rm keelson-connector-moza "moza2keelson --help"
+      - name: evdev built and its codes match ours
+        run: docker run --rm keelson-connector-moza "python -c 'import moza_connector.device as d, moza_connector.codes as c, evdev.ecodes as e; assert all(getattr(e, k) == v for k, v in c.ABS.items()); assert (e.FF_SPRING, e.FF_DAMPER, e.FF_GAIN, e.FF_AUTOCENTER) == (c.FF_SPRING, c.FF_DAMPER, c.FF_GAIN, c.FF_AUTOCENTER)'"
+      # The real evdev path (discovery, absinfo, events, FF upload/erase/gain) against a
+      # uinput virtual base -- the runner's kernel, not a Moza.
+      - name: evdev path against a virtual base
+        run: |
+          sudo modprobe uinput
+          docker run --rm --privileged -u root -v /dev:/dev -v "$PWD/scripts":/t:ro keelson-connector-moza "python -I /t/uinput_check.py"
