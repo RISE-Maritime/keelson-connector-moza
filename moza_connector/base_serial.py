@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 
@@ -111,8 +112,11 @@ class FakeBaseSerial:
 
     def _save(self) -> None:
         if self._file:
-            with open(self._file, "w") as f:
+            # Atomic: another process (a test) may read it at any moment.
+            tmp = f"{self._file}.tmp"
+            with open(tmp, "w") as f:
                 json.dump(self.values, f)
+            os.replace(tmp, self._file)
 
     def read(self, name: str) -> int:
         if self.gone:

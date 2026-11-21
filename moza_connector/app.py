@@ -536,10 +536,18 @@ def _run_with_device(
                 patch = {k: v for k, v in patch.items() if k not in moving or (k == "base_range_deg" and base_stop is None)}
                 test = patch.pop("test", None)
                 if test is not None:
-                    # Trying a haptic changes no setting, so nothing is saved.
+                    # Trying a haptic (or showing an alarm colour) changes no setting: nothing saved.
                     if patch:
                         raise ValueError("'test' goes alone, not with settings")
-                    ffb.test_pulse(str(test), time.monotonic())
+                    test = str(test)
+                    if test.startswith("rim-"):
+                        if rim is None:
+                            raise ValueError("no rim LEDs (moza2keelson --base-serial)")
+                        if test[4:] not in model.ALARM_LEVELS:
+                            raise ValueError(f"no alarm level {test[4:]!r}")
+                        rim.preview(test[4:], time.monotonic())
+                        return
+                    ffb.test_pulse(test, time.monotonic())
                     return
                 with helm_lock:
                     new = model.apply_helm(helm, patch, gain_cap_pct=args.ffb_max_gain_pct, read_only=fixed)

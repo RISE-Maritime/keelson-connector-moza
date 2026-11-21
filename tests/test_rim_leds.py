@@ -82,3 +82,13 @@ def test_the_rims_commands_are_writable_but_the_motor_is_not():
         except ValueError:
             continue
         raise AssertionError(f"{name} must not be writable")
+
+
+def test_show_previews_a_colour_then_goes_back():
+    base = FakeBaseSerial()
+    rim, _ = rim_with(base)
+    rim.preview("caution", 10.0)
+    rim.sync(FfbSettings(alarm_leds=False), None, 10.1)  # shown even with the alarm colours off
+    assert colours(base) == {0xFFD400}
+    rim.sync(FfbSettings(alarm_leds=False), None, 13.5)
+    assert colours(base) == {OWN}

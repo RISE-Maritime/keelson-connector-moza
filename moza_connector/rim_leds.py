@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 
 from . import model
 from . import serial_proto as proto
@@ -25,6 +26,8 @@ from .model import FfbSettings
 log = logging.getLogger(__name__)
 
 NAMES = (*proto.RIM_COLORS, *proto.RIM_BRIGHTNESS)
+#: How long the panel's Show displays a level's colour.
+PREVIEW_S = 3.0
 _LEVEL_NAMES = {p: level for level, p in model.ALARM_PRIORITIES.items()}
 
 
@@ -48,6 +51,7 @@ class RimLeds:
         self._color: int | None = None  # the alarm colour showing, None for the rim's own
         self._dark = False
         self._closed = False
+        self._preview: tuple[int, float] | None = None  # (priority, until)
         self.status = "off"
 
     def start(self, pending: dict | None) -> None:
@@ -63,11 +67,21 @@ class RimLeds:
             self._persist(None)
             self.status = "ready"
 
+    def preview(self, level: str, now: float) -> None:
+        """Show a level's colour for ``PREVIEW_S`` (the panel's Show), alarms or not."""
+        with self._lock:
+            self._preview = (model.ALARM_PRIORITIES[level], now + PREVIEW_S)
+
     def sync(self, settings: FfbSettings, top: int | None, now: float) -> None:
         """Show what ``model.rim_led_state`` says. Never raises."""
         with self._lock:
             if self._closed or not self._own:
                 return
+            if self._preview is not None and now < self._preview[1]:
+                settings = replace(settings, alarm_leds=True)
+                top = max(top or 0, self._preview[0])
+            else:
+                self._preview = None
             color, dark = model.rim_led_state(settings, top, now)
             try:
                 if color != self._color:
