@@ -51,6 +51,7 @@ class _Axis:
     map: AxisMap
     range: AxisRange
     source_id: str
+    raw: int | None = None
     value: float | None = None
     published_value: float | None = None
     published_at: float | None = None
@@ -66,8 +67,10 @@ class InputPublisher:
         source_base: str,
         rate: RateSettings,
         wall_ns: Callable[[], int] = time.time_ns,
+        lock_fraction: float = 1.0,
     ):
         self._put = put
+        self._lock_fraction = lock_fraction
         self._rate = rate
         self._wall_ns = wall_ns
         self._lock = threading.Lock()
@@ -95,10 +98,34 @@ class InputPublisher:
         out += [(BUTTON_SUBJECT, s) for s in self._buttons.values()]
         return sorted(out)
 
+    @property
+    def steering_value(self) -> float | None:
+        """The wheel's latest position as published (percent of full helm lock)."""
+        with self._lock:
+            for axis in self._axes.values():
+                if axis.map.steering:
+                    return axis.value
+        return None
+
     def _scaled(self, axis: _Axis, raw: int) -> float:
         m, r = axis.map, axis.range
+        axis.raw = raw
         v = model.normalize(raw, r.lo, r.hi, bipolar=m.bipolar, invert=m.invert)
+        if m.steering:
+            v = model.steering_pct(v, self._lock_fraction)
         return model.snap(v, self._rate.center_snap_pct)
+
+    def set_lock_fraction(self, fraction: float, now: float) -> None:
+        """Full helm lock moved (``FfbSettings.lock_fraction``): re-scale the wheel and
+        publish it at once, so the bus never carries the old scale for a backstop period."""
+        with self._lock:
+            if fraction == self._lock_fraction:
+                return
+            self._lock_fraction = fraction
+            for axis in self._axes.values():
+                if axis.map.steering and axis.raw is not None:
+                    axis.value = self._scaled(axis, axis.raw)
+                    self._publish_axis(axis, now)
 
     def prime(self, now: float) -> None:
         """Publish every axis' current position (from absinfo) once, at start-up."""

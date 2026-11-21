@@ -8,11 +8,18 @@ import os
 import sys
 import threading
 import time
+from dataclasses import replace
 
 import keelson
 import zenoh
 from keelson.payloads.Primitives_pb2 import TimestampedFloat
-from keelson.scaffolding import GracefulShutdown, add_common_arguments, create_zenoh_config, setup_logging
+from keelson.scaffolding import (
+    GracefulShutdown,
+    add_common_arguments,
+    create_zenoh_config,
+    make_configurable,
+    setup_logging,
+)
 from keelson.scaffolding.liveliness import declare_liveliness
 from keelson.scaffolding.qos_zenoh import declare_publisher
 
@@ -46,6 +53,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("-e", "--entity-id", required=True, help="The entity the helm belongs to")
     p.add_argument("-s", "--source-id", default="moza_r21", help="Source id base; each input is <source-id>/<input>")
     p.add_argument("-p", "--profile", default="r21-ultra", help="Built-in profile name or path to a profile YAML")
+    p.add_argument(
+        "--backend",
+        choices=devices.BACKENDS,
+        default="auto",
+        help="How to reach the base: evdev (Linux kernel driver) or hid (hidapi, macOS); auto picks by platform",
+    )
     p.add_argument("-d", "--device", help="evdev node of the base (default: find it by the profile's vendor and name)")
     p.add_argument("--wait-s", type=float, default=2.0, help="Retry interval while the base is absent; 0 exits instead")
     p.add_argument("--fake-device", help=argparse.SUPPRESS)
@@ -55,9 +68,27 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--axis-min-hz", type=float, default=10.0, help="Backstop: every axis re-sent at least this often")
     g.add_argument("--axis-deadband-pct", type=float, default=2.0, help="A jump bigger than this bypasses the cap")
     g.add_argument("--axis-center-snap-pct", type=float, default=0.5, help="Within this of 0, publish exactly 0")
+    g.add_argument(
+        "--base-range-deg",
+        type=float,
+        default=900.0,
+        help="The base's steering angle, lock to lock, as set in Pit House or Boxflat (the USB reports do not say)",
+    )
+    g.add_argument(
+        "--wheel-lock-deg",
+        type=float,
+        help="Wheel rotation from centre to full helm lock (+-100 %%); past it force feedback adds an end stop. "
+        "Default: half of --base-range-deg, the base's own end",
+    )
 
     f = p.add_argument_group("force feedback")
     f.add_argument("--ffb", choices=[m.value for m in FfbMode], default=FfbMode.FOLLOW_UP.value, help="Mode")
+    f.add_argument(
+        "--ffb-preset",
+        choices=list(model.PRESETS),
+        help="A named behaviour (mode, spring, damper, end stop, lock, clicks); it overrides those --ffb-* "
+        "settings and --wheel-lock-deg, never the gain",
+    )
     f.add_argument(
         "--ffb-max-gain-pct",
         type=float,
@@ -75,6 +106,17 @@ def parser() -> argparse.ArgumentParser:
         help="The rudder reports positive to port (default: positive is starboard, as wheel_position_pct)",
     )
     f.add_argument("--ffb-stale-s", type=float, default=1.0, help="Older rudder data falls back to plain centring")
+    f.add_argument(
+        "--ffb-endstop-pct", type=float, default=100.0, help="End-stop stiffness past --wheel-lock-deg, under the gain"
+    )
+    f.add_argument("--ffb-detent-deg", type=float, default=5.0, help="detent mode: a click each this much rudder order")
+    f.add_argument("--ffb-detent-pct", type=float, default=60.0, help="detent mode: click strength, under the gain")
+    f.add_argument(
+        "--ffb-remote",
+        action="store_true",
+        help="Let configurable/v1 (Crowsnest) switch force feedback and tune it, never above --ffb-max-gain-pct. "
+        "Force feedback then starts off, whatever --ffb says",
+    )
     return p
 
 
@@ -83,6 +125,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.fake_device and os.environ.get(TESTING_ENV) != "1":
         p.error(f"--fake-device is for the tests only (set {TESTING_ENV}=1)")
+    if args.device and devices.resolve_backend(args.backend) != "evdev":
+        p.error("--device names an evdev node: it needs --backend evdev")
     if args.axis_min_hz < 0 or args.axis_max_hz < 0:
         p.error("--axis-min-hz and --axis-max-hz must be >= 0")
     if args.axis_max_hz and args.axis_min_hz > args.axis_max_hz:
@@ -91,6 +135,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error(f"--ffb-max-gain-pct is capped at {model.MAX_GAIN_CEILING_PCT:.0f}")
     if args.ffb_rudder_max_deg <= 0:
         p.error("--ffb-rudder-max-deg must be positive")
+    lo, hi = model.CONFIG_BOUNDS["base_range_deg"]
+    if not lo <= args.base_range_deg <= hi:
+        p.error(f"--base-range-deg must be {lo:g}..{hi:g}")
+    if args.wheel_lock_deg is None:
+        args.wheel_lock_deg = args.base_range_deg / 2.0
+    if not model.CONFIG_BOUNDS["wheel_lock_deg"][0] <= args.wheel_lock_deg <= args.base_range_deg / 2.0:
+        p.error("--wheel-lock-deg must be at least 5 and at most half of --base-range-deg (the base's own end)")
+    if not 0 <= args.ffb_endstop_pct <= 100:
+        p.error("--ffb-endstop-pct must be 0..100")
+    lo, hi = model.CONFIG_BOUNDS["detent_deg"]
+    if not lo <= args.ffb_detent_deg <= hi:
+        p.error(f"--ffb-detent-deg must be {lo:g}..{hi:g}")
+    if not 0 <= args.ffb_detent_pct <= 100:
+        p.error("--ffb-detent-pct must be 0..100")
     return args
 
 
@@ -100,7 +158,7 @@ def open_device(args, profile: profiles.Profile, shutdown: GracefulShutdown) -> 
     announced = False
     while not shutdown.is_requested():
         try:
-            return devices.find(profile, args.device)
+            return devices.find(profile, args.device, args.backend)
         except (FileNotFoundError, PermissionError) as e:
             if args.wait_s <= 0:
                 log.error("%s", e)
@@ -152,6 +210,31 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                 pub = publishers[(subject, source_id)] = declare_publisher(session, key)
             pub.put(payload)
 
+        steering = prof.steering
+        if args.ffb_remote and args.ffb != FfbMode.OFF.value:
+            log.info("--ffb-remote: force feedback starts off (not %s) until it is switched on remotely", args.ffb)
+        settings = FfbSettings(
+            mode=FfbMode(args.ffb),
+            max_gain_pct=args.ffb_max_gain_pct,
+            spring_pct=args.ffb_spring_pct,
+            damper_pct=args.ffb_damper_pct,
+            stale_s=args.ffb_stale_s,
+            rudder_max_deg=args.ffb_rudder_max_deg,
+            rudder_invert=args.ffb_rudder_invert,
+            wheel_invert=steering.invert,
+            base_range_deg=args.base_range_deg,
+            wheel_lock_deg=args.wheel_lock_deg,
+            endstop_pct=args.ffb_endstop_pct,
+            detent_deg=args.ffb_detent_deg,
+            detent_pct=args.ffb_detent_pct,
+        )
+        if args.ffb_preset:
+            settings = model.apply_config(
+                settings, {"preset": args.ffb_preset}, gain_cap_pct=args.ffb_max_gain_pct, read_only={}
+            )
+            log.info("Preset %s: %s", args.ffb_preset, model.PRESETS[args.ffb_preset].description)
+        if args.ffb_remote:
+            settings = replace(settings, mode=FfbMode.OFF)
         inputs = InputPublisher(
             put,
             prof,
@@ -159,21 +242,10 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
             dev.keys(),
             args.source_id,
             RateSettings(args.axis_max_hz, args.axis_min_hz, args.axis_deadband_pct, args.axis_center_snap_pct),
+            lock_fraction=settings.lock_fraction,
         )
-        steering = prof.steering
-        ffb = FfbController(
-            dev,
-            FfbSettings(
-                mode=FfbMode(args.ffb),
-                max_gain_pct=args.ffb_max_gain_pct,
-                spring_pct=args.ffb_spring_pct,
-                damper_pct=args.ffb_damper_pct,
-                stale_s=args.ffb_stale_s,
-                rudder_max_deg=args.ffb_rudder_max_deg,
-                rudder_invert=args.ffb_rudder_invert,
-                wheel_invert=steering.invert,
-            ),
-        )
+        log.info("Full helm lock at %.0f deg of the base's %.0f lock to lock", args.wheel_lock_deg, args.base_range_deg)
+        ffb = FfbController(dev, settings)
 
         lost = threading.Event()  # the base is gone: exit EXIT_DEVICE_LOST
         failed = threading.Event()  # a worker thread died: stop rather than run half a helm
@@ -186,8 +258,12 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                 log.error("%s failed: %r", name, e, exc_info=e)
                 failed.set()
 
+        remote = args.ffb_remote and dev.has_ff()
+        if args.ffb_remote and not remote:
+            log.warning("--ffb-remote: %s has no force feedback; serving its (off) settings only", dev.name)
+
         subscriber = None
-        if ffb.active and args.ffb == FfbMode.FOLLOW_UP.value:
+        if remote or (ffb.active and args.ffb == FfbMode.FOLLOW_UP.value):
             rudder_key = keelson.construct_pubsub_key(
                 args.realm, args.ffb_entity or args.entity_id, "rudder_angle_deg", args.ffb_source
             )
@@ -204,7 +280,40 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
             subscriber = session.declare_subscriber(rudder_key, on_rudder)
             log.info("Follow-up from %s", rudder_key)
 
-        with declare_liveliness(session, args.realm, args.entity_id, args.source_id, pubsub_subjects=inputs.subjects):
+        subjects = list(inputs.subjects)
+        if args.ffb_remote:
+            def read_only() -> dict:
+                return {
+                    "gain_cap_pct": args.ffb_max_gain_pct,
+                    "ceiling_pct": model.MAX_GAIN_CEILING_PCT,
+                    "has_ff": dev.has_ff(),
+                    "active": ffb.running,
+                    "spring_source": ffb.spring_source,
+                    "backend": "fake" if args.fake_device else devices.resolve_backend(args.backend),
+                    "presets": model.preset_list(),
+                }
+
+            def get_config() -> dict:
+                return {**model.config_of(ffb.settings), "preset": model.matching_preset(ffb.settings), **read_only()}
+
+            def set_config(patch: dict) -> None:
+                # Read-only keys are compared, not trusted: "active" and "spring_source"
+                # move on their own, so a stale round trip of them is ignored.
+                current = read_only()
+                fixed = {k: v for k, v in current.items() if k not in ("active", "spring_source")}
+                patch = {k: v for k, v in patch.items() if k not in ("active", "spring_source")}
+                new = model.apply_config(ffb.settings, patch, gain_cap_pct=args.ffb_max_gain_pct, read_only=fixed)
+                if new.mode is not FfbMode.OFF and not dev.has_ff():
+                    raise ValueError(f"{dev.name} has no force feedback")
+                log.info("set_config %s", patch)
+                ffb.update(new, time.monotonic())
+                inputs.set_lock_fraction(new.lock_fraction, time.monotonic())
+
+            make_configurable(session, args.realm, args.entity_id, args.source_id, get_config, set_config)
+            subjects.append("configuration_json")
+            log.info("Force feedback settable over configurable/v1 (cap %.0f%%)", args.ffb_max_gain_pct)
+
+        with declare_liveliness(session, args.realm, args.entity_id, args.source_id, pubsub_subjects=sorted(subjects)):
             log.info("%s on %s: publishing %s", dev.name, dev.path, ", ".join(f"{s}/{src}" for s, src in inputs.sources))
             stop = threading.Event()
             threads = []
@@ -214,13 +323,18 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                 ffb.start(now)
                 if args.axis_min_hz > 0:
                     threads.append(_periodic(stop, args.axis_min_hz, inputs.backstop, "axis-backstop", on_thread_error))
-                if ffb.active:
+                if ffb.active or remote:
                     threads.append(_periodic(stop, FFB_HZ, ffb.tick, "ffb", on_thread_error))
 
+                last_wheel = None
                 while not (shutdown.is_requested() or lost.is_set() or failed.is_set()):
                     try:
                         for ev in dev.events(POLL_S):
                             inputs.handle(ev.type, ev.code, ev.value, time.monotonic())
+                        wheel = inputs.steering_value
+                        if wheel is not None and wheel != last_wheel:
+                            last_wheel = wheel
+                            ffb.on_wheel(wheel, time.monotonic())  # detent clicks
                     except DeviceGone as e:
                         log.error("The base is gone (%s): stopping, so the helm goes silent", e)
                         lost.set()

@@ -1,0 +1,22 @@
+# Moza R21 Ultra (and R16 / R21) with no pedals: the wheel and the buttons only.
+#
+# The base reports its pedal axes even with nothing plugged in, parked at their minimum,
+# so r21-ultra would publish a steady 0 % throttle and brake from pedals that do not
+# exist. This profile publishes only what is there.
+name: r21-ultra-no-pedals
+
+match:
+  vendor: 0x346e
+  name_regex: "MOZA R\\d+"
+
+axes:
+  - code: ABS_X
+    subject: wheel_position_pct      # -100 port lock .. +100 starboard lock
+    input: wheel
+    range: bipolar
+    steering: true                   # the axis force feedback acts on
+    invert: false
+
+buttons:
+  # btn_<n> is HID Button n+1, on both backends. Name the ones you use here.
+  names: {}

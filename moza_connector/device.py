@@ -1,8 +1,8 @@
 """The wheelbase: reading it and driving its force feedback.
 
 ``MozaDevice`` is what the rest of the connector sees. ``EvdevDevice`` is the real base on
-Linux; ``FakeDevice`` replays a scripted session for the tests (and records every
-force-feedback call), so nothing above this module ever imports evdev.
+Linux; ``hid_device.HidDevice`` is the real base on macOS; ``FakeDevice`` replays a scripted session for the tests (and records every
+force-feedback call), so nothing above this module ever imports evdev or hidapi.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import errno
 import json
 import logging
 import select
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -59,8 +60,16 @@ class MozaDevice(Protocol):
 
     def set_autocenter(self, level: int) -> None: ...
 
-    def upload_condition(self, effect_type: int, effect_id: int, *, center: int, coeff: int, saturation: int) -> int:
-        """Upload (``effect_id`` -1) or update a spring/damper; returns the effect id."""
+    def upload_condition(
+        self, effect_type: int, effect_id: int, *, center: int, coeff: int, saturation: int, deadband: int = 0
+    ) -> int:
+        """Upload (``effect_id`` -1) or update a spring/damper; returns the effect id.
+        ``deadband`` (u16): no force within it either side of ``center``."""
+        ...
+
+    def upload_click(self, effect_id: int, *, magnitude: int, period_ms: int, duration_ms: int) -> int:
+        """Upload (``effect_id`` -1) or update a short square pulse that plays
+        ``duration_ms`` each time it is started; returns the effect id."""
         ...
 
     def play(self, effect_id: int, on: bool) -> None: ...
@@ -87,6 +96,8 @@ class EvdevDevice:
             ("EV_ABS", codes.EV_ABS),
             ("EV_FF", codes.EV_FF),
             ("FF_SPRING", codes.FF_SPRING),
+            ("FF_PERIODIC", codes.FF_PERIODIC),
+            ("FF_SQUARE", codes.FF_SQUARE),
             ("FF_DAMPER", codes.FF_DAMPER),
             ("FF_GAIN", codes.FF_GAIN),
             ("FF_AUTOCENTER", codes.FF_AUTOCENTER),
@@ -137,14 +148,16 @@ class EvdevDevice:
     def set_autocenter(self, level: int) -> None:
         self._write_ff(codes.FF_AUTOCENTER, level)
 
-    def upload_condition(self, effect_type: int, effect_id: int, *, center: int, coeff: int, saturation: int) -> int:
+    def upload_condition(
+        self, effect_type: int, effect_id: int, *, center: int, coeff: int, saturation: int, deadband: int = 0
+    ) -> int:
         ff = self._evdev.ff
         cond = ff.Condition(
             right_saturation=saturation,
             left_saturation=saturation,
             right_coeff=coeff,
             left_coeff=coeff,
-            deadband=0,
+            deadband=deadband,
             center=center,
         )
         effect = ff.Effect(
@@ -154,6 +167,26 @@ class EvdevDevice:
             ff.Trigger(0, 0),
             ff.Replay(0, 0),  # length 0: play until stopped
             ff.EffectType(ff_condition_effect=(ff.Condition * 2)(cond, cond)),
+        )
+        return self._dev.upload_effect(effect)
+
+    def upload_click(self, effect_id: int, *, magnitude: int, period_ms: int, duration_ms: int) -> int:
+        ff = self._evdev.ff
+        periodic = ff.Periodic(
+            waveform=codes.FF_SQUARE,
+            period=period_ms,
+            magnitude=magnitude,
+            offset=0,
+            phase=0,
+            envelope=ff.Envelope(0, 0, 0, 0),
+        )
+        effect = ff.Effect(
+            codes.FF_PERIODIC,
+            effect_id,
+            0x4000,
+            ff.Trigger(0, 0),
+            ff.Replay(duration_ms, 0),
+            ff.EffectType(ff_periodic_effect=periodic),
         )
         return self._dev.upload_effect(effect)
 
@@ -167,8 +200,25 @@ class EvdevDevice:
         self._dev.close()
 
 
-def find(profile: Profile, path: str | None = None) -> EvdevDevice:
-    """The base: ``path`` when given, else the first evdev device the profile matches."""
+BACKENDS = ("auto", "evdev", "hid")
+
+
+def resolve_backend(backend: str) -> str:
+    """``auto`` is evdev on Linux (the kernel drives force feedback) and HID elsewhere."""
+    if backend not in BACKENDS:
+        raise ValueError(f"unknown backend {backend!r}")
+    if backend == "auto":
+        return "evdev" if sys.platform.startswith("linux") else "hid"
+    return backend
+
+
+def find(profile: Profile, path: str | None = None, backend: str = "auto") -> MozaDevice:
+    """The base: over HID (macOS), or the evdev node ``path``, or the first evdev device
+    the profile matches."""
+    if resolve_backend(backend) == "hid":
+        from .hid_device import find_hid
+
+        return find_hid(profile)
     if path:
         return EvdevDevice(path)
     import evdev
@@ -277,11 +327,20 @@ class FakeDevice:
     def set_autocenter(self, level: int) -> None:
         self._record("autocenter", level)
 
-    def upload_condition(self, effect_type: int, effect_id: int, *, center: int, coeff: int, saturation: int) -> int:
+    def upload_condition(
+        self, effect_type: int, effect_id: int, *, center: int, coeff: int, saturation: int, deadband: int = 0
+    ) -> int:
         if effect_id == -1:
             effect_id = self._next_id
             self._next_id += 1
-        self._record("upload", effect_type, effect_id, center, coeff, saturation)
+        self._record("upload", effect_type, effect_id, center, coeff, saturation, deadband)
+        return effect_id
+
+    def upload_click(self, effect_id: int, *, magnitude: int, period_ms: int, duration_ms: int) -> int:
+        if effect_id == -1:
+            effect_id = self._next_id
+            self._next_id += 1
+        self._record("click", effect_id, magnitude, period_ms, duration_ms)
         return effect_id
 
     def play(self, effect_id: int, on: bool) -> None:

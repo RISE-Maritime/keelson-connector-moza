@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "keelson-connector-moza"
 version = "0.1.0"
-description = "Moza direct-drive wheelbase (R21 Ultra) as a keelson helm: wheel, pedals and buttons onto the bus, rudder follow-up as force feedback."
+description = "Moza direct-drive wheelbase (R21 Ultra) as a keelson helm: wheel, pedals and buttons onto the bus, rudder follow-up as force feedback. Linux (evdev) and macOS (HID)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -20,6 +20,8 @@ dependencies = [
     # kernel headers to build, so it is never installed on macOS -- the tests
     # run there against the fake device.
     "evdev==2.0.0; sys_platform == 'linux'",
+    # macOS: the wheel is read and driven over USB HID (moza_connector/hid_device.py).
+    "hidapi==0.15.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +29,7 @@ dev = ["pytest==8.3.4", "ruff==0.14.11"]
 
 [project.scripts]
 moza2keelson = "moza_connector.app:main"
+moza-rudder-sim = "moza_connector.rudder_sim_app:main"
 
 [tool.setuptools]
 packages = ["moza_connector"]

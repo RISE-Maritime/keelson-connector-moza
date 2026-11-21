@@ -97,3 +97,31 @@ def _builtin():
     import yaml
 
     return yaml.safe_load(profile.builtin_path("r21-ultra").read_text())
+
+
+def test_short_helm_lock_scales_the_wheel_and_holds_past_it():
+    sink = Sink()
+    pub = InputPublisher(
+        sink, profile.load("r21-ultra"), AXES, KEYS, "moza_r21", RateSettings(), lock_fraction=0.2
+    )
+    wheel = ("wheel_position_pct", "moza_r21/wheel")
+    pub.prime(0.0)
+    # A tenth of the axis' half travel to starboard is half of a lock at a fifth of it.
+    pub.handle(codes.EV_ABS, codes.ABS["ABS_X"], round(32767.5 + 0.1 * 32767.5), 1.0)
+    assert sink.of(*wheel)[-1] == pytest.approx(50.0, abs=0.1)
+    pub.handle(codes.EV_ABS, codes.ABS["ABS_X"], 0, 2.0)  # the base's own port end
+    assert sink.of(*wheel)[-1] == -100.0
+    # The pedals are not scaled.
+    pub.handle(codes.EV_ABS, codes.ABS["ABS_Z"], 500, 3.0)
+    assert sink.of("joystick_rt_pct", "moza_r21/throttle")[-1] == 50.0
+
+
+def test_moving_the_lock_republishes_the_wheel_at_once():
+    pub, sink = make()
+    wheel = ("wheel_position_pct", "moza_r21/wheel")
+    pub.prime(0.0)
+    pub.handle(codes.EV_ABS, codes.ABS["ABS_X"], round(32767.5 + 0.25 * 32767.5), 1.0)
+    assert sink.of(*wheel)[-1] == pytest.approx(25.0, abs=0.1)
+    n = len(sink.of(*wheel))
+    pub.set_lock_fraction(0.5, 1.001)  # inside the rate cap: still sent
+    assert len(sink.of(*wheel)) == n + 1 and sink.of(*wheel)[-1] == pytest.approx(50.0, abs=0.1)

@@ -14,7 +14,8 @@ from pathlib import Path
 import keelson
 import pytest
 import zenoh
-from keelson.payloads.Primitives_pb2 import TimestampedFloat, TimestampedInt
+from keelson.interfaces.ErrorResponse_pb2 import ErrorResponse
+from keelson.payloads.Primitives_pb2 import TimestampedFloat, TimestampedInt, TimestampedString
 
 from moza_connector import codes, model
 
@@ -196,3 +197,131 @@ def test_fake_device_refused_outside_the_tests(tmp_path):
         env=env,
     )
     assert r.returncode == 2 and "for the tests only" in r.stderr
+
+
+def rpc(h, procedure, payload=None):
+    key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", procedure, "moza_r21")
+    replies = list(h.session.get(key, payload=payload, timeout=5.0))
+    assert len(replies) == 1, f"{procedure}: {len(replies)} replies"
+    r = replies[0]
+    if r.ok is not None:
+        return True, r.ok.payload.to_bytes()
+    return False, ErrorResponse.FromString(r.err.payload.to_bytes()).error_description
+
+
+def test_remote_force_feedback_over_configurable(h):
+    published = []
+    sub = h.session.declare_subscriber(f"{BASE}/configuration_json/moza_r21", lambda s: published.append(s))
+    try:
+        h.start([], "--ffb", "follow-up", "--ffb-remote", "--ffb-max-gain-pct", "20")
+        key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
+        wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
+
+        ok, body = rpc(h, "get_config")
+        cfg = json.loads(body)
+        assert ok and cfg["mode"] == "off" and cfg["active"] is False and cfg["gain_cap_pct"] == 20
+        time.sleep(0.3)
+        assert h.ff() == []  # --ffb-remote starts off whatever --ffb says
+
+        ok, _ = rpc(h, "set_config", json.dumps({"mode": "center", "max_gain_pct": 10}).encode())
+        assert ok
+        wait(lambda: any(e[0] == "upload" and e[1] == codes.FF_SPRING for e in h.ff()), what="the spring")
+        wait(lambda: ("gain", model.gain_level(10)) in h.ff(), what="the gain to ramp to 10%")
+        g = [e[1] for e in h.ff() if e[0] == "gain"]
+        assert g[0] == 0 and g == sorted(g)
+        assert json.loads(rpc(h, "get_config")[1])["active"] is True
+
+        ok, err = rpc(h, "set_config", json.dumps({"max_gain_pct": 99}).encode())
+        assert not ok and "cap is 20" in err
+        assert json.loads(rpc(h, "get_config")[1])["max_gain_pct"] == 10
+
+        ok, _ = rpc(h, "set_config", json.dumps({"mode": "off"}).encode())
+        assert ok
+        ff = h.ff()
+        assert {e[2] for e in ff if e[0] == "upload"} == {e[1] for e in ff if e[0] == "erase"}
+        assert ff[-1] == ("gain", 0)
+        wait(lambda: len(published) >= 3, what="configuration_json")
+        last = json.loads(TimestampedString.FromString(keelson.uncover(published[-1].payload.to_bytes())[2]).value)
+        assert last["mode"] == "off" and last["active"] is False
+    finally:
+        sub.undeclare()
+
+
+def test_no_remote_control_without_the_flag(h):
+    h.start([], "--ffb", "off")
+    key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
+    time.sleep(0.5)
+    assert list(h.session.get(key, timeout=1.0)) == []
+
+
+def test_rudder_sim_follows_the_wheel_and_returns_when_it_goes_silent(h):
+    zcfg = h.tmp / "sim-zenoh.json5"
+    zcfg.write_text(
+        json.dumps(
+            {
+                "mode": "peer",
+                "scouting": {"multicast": {"enabled": False}, "gossip": {"enabled": False}},
+                "connect": {"endpoints": [f"tcp/127.0.0.1:{h.port}"]},
+                "listen": {"endpoints": []},
+            }
+        )
+    )
+    rudder: list[tuple[float, float]] = []
+    sub = h.session.declare_subscriber(
+        f"{BASE}/rudder_angle_deg/rudder_sim",
+        lambda s: rudder.append(
+            (time.monotonic(), TimestampedFloat.FromString(keelson.uncover(s.payload.to_bytes())[2]).value)
+        ),
+    )
+    wheel = h.session.declare_publisher(f"{BASE}/wheel_position_pct/moza_r21/wheel")
+    proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "bin/moza-rudder-sim.py"), "-r", REALM, "-e", V, "--zenoh-config", str(zcfg),
+         "--hull", "usv-6m"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        wait(lambda: len(rudder) >= 3, what="the simulated rudder")
+
+        def steer(pct):
+            p = TimestampedFloat()
+            p.timestamp.FromNanoseconds(time.time_ns())
+            p.value = pct
+            wheel.put(keelson.enclose(p.SerializeToString()))
+
+        # Half starboard helm on a usv (30 deg travel): the rudder settles at 15 deg.
+        def at_15():
+            steer(50.0)
+            return rudder and abs(rudder[-1][1] - 15.0) < 0.5
+
+        wait(at_15, timeout=5.0, what="15 deg of rudder")
+        t0 = time.monotonic()
+        time.sleep(1.0)
+        assert 8 <= sum(1 for t, _ in rudder if t >= t0) <= 12  # 10 Hz, like Slipway's tick
+
+        # The wheel goes silent: after 1 s the order is amidships, never the last value.
+        wait(lambda: abs(rudder[-1][1]) < 0.5, timeout=5.0, what="the rudder back amidships")
+    finally:
+        proc.terminate()
+        out, _ = proc.communicate(timeout=10)
+        sub.undeclare()
+        wheel.undeclare()
+    assert proc.returncode == 0, out
+    assert "returns to amidships" in out
+
+
+def test_remote_preset_switches_behaviour(h):
+    h.start([], "--ffb-remote", "--ffb-max-gain-pct", "20", "--ffb-preset", "car")
+    key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
+    wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
+    cfg = json.loads(rpc(h, "get_config")[1])
+    assert cfg["mode"] == "off" and cfg["preset"] == "car"  # loaded, not on: --ffb-remote starts off
+    assert [p["name"] for p in cfg["presets"]] == list(model.PRESETS)
+
+    ok, _ = rpc(h, "set_config", json.dumps({"preset": "notched"}).encode())
+    assert ok
+    cfg = json.loads(rpc(h, "get_config")[1])
+    assert (cfg["preset"], cfg["mode"], cfg["active"], cfg["wheel_lock_deg"]) == ("notched", "detent", True, 90.0)
+    wait(lambda: any(e[0] == "click" for e in h.ff()), what="the detent click uploaded")
+    assert not any(e[0] == "upload" and e[1] == codes.FF_SPRING and e[6] == 0 for e in h.ff())  # no centring spring
