@@ -55,9 +55,15 @@ When the base's effect pool is full, a haptic that can't be loaded is logged and
 
 In every mode except `off`, the connector also adds a damper (`--ffb-damper-pct`, 0 to disable) and switches off the base's own autocentre so the two don't fight.
 
-### Behaviour presets
+### Profiles
 
-A preset sets the wheel's whole behaviour in one go: the mode, spring, damper, end stop, full lock, rudder at full lock and clicks. Choose one with `--ffb-preset NAME`, or from Crowsnest. It never sets the gain, which stays the overall strength under the cap. Anything set by hand afterwards makes the behaviour `custom`.
+A profile is the wheel's whole behaviour: the mode, spring, centring boost, damper, end stop, full lock, centre deadband, rudder at full lock, clicks, centre mark and every haptic. It never holds the gain (the overall strength, under the cap) nor the wheel's setup (base range, rudder invert, stale time), which belong to this wheel.
+
+- **Built in:** the presets below, each its own settings over the defaults (so choosing one also sets the haptics), and `command-line`, the `--ffb-*` flags the connector was started with.
+- **Your own:** saved from Crowsnest under a name; they can be saved again after tuning, and deleted.
+- **One is the default:** the connector starts in it (`--ffb-profile NAME` overrides it for one run). Out of the box it is `command-line`.
+
+Tuning changes the selected profile's values; until saved they are the profile's unsaved changes (`modified`), and a restart drops them.
 
 | Preset | Name | Behaviour |
 |---|---|---|
@@ -74,7 +80,7 @@ A preset sets the wheel's whole behaviour in one go: the mode, spring, damper, e
 
 A handlebar (`jetski`) or any short lock feels stiffest with a small steering angle set on the base in Pit House (for example 90°), because a spring's pull per degree scales with the base's range.
 
-The full lock of a preset is pulled in to fit the base: `ship`, `hydraulic` and `follow-rudder` use the base's whole range, and `car` 450° where the base has it.
+The full lock of a profile is pulled in to fit the base: `ship`, `hydraulic` and `follow-rudder` use the base's whole range, and `car` 450° where the base has it.
 
 ### From Crowsnest (`--ffb-remote`)
 
@@ -83,18 +89,24 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 - **Starts off.** Force feedback is off at start-up, whatever `--ffb` says, until someone switches it on.
 - **The command line sets the cap.** A remote gain can't exceed `--ffb-max-gain-pct`, which can't exceed the 60 % ceiling. A higher request is refused with an error reply, not clipped.
 - **Gain changes are gentle.** Every rise ramps from the current gain over 2 s; a drop applies at once. Switching on ramps from 0.
-- **Off releases the wheel.** Mode `off` stops and erases every effect and sets the gain to 0, as on exit.
+- **On is a switch, the mode is the profile's.** `enabled: true` plays the selected profile in its own mode; changing `mode` never switches force feedback on.
+- **Off releases the wheel.** `enabled: false` (or mode `off`) stops and erases every effect and sets the gain to 0, as on exit.
 - **Without the flag** nothing is served, and nobody on the bus can touch the motor.
 
 `get_config` returns these, and `set_config` takes any subset of the writable ones:
 
 | Key | Writable | Values |
 |---|---|---|
-| `mode` | yes | `off`, `center`, `follow-up`, `detent` |
-| `preset` | yes | a preset's name, applied at once; reads back as the matching preset or `custom` |
-| `presets` | no | every preset's `name`, `label`, `description` and whether it is the operator's own (`custom`) |
-| `save_preset` | action | `"Rivo bridge"`: saves the current behaviour under that name (never the gain) |
-| `delete_preset` | action | a saved behaviour's name; built-ins can't be deleted |
+| `enabled` | yes | `true` / `false`: force feedback on or off; never saved |
+| `mode` | yes | the profile's mode: `center`, `follow-up`, `detent`; `off` is `enabled: false` |
+| `profile` | yes | the selected profile; another name loads it, dropping unsaved changes |
+| `default_profile` | yes | the profile the connector starts in |
+| `profiles` | no | every profile's `name`, `label`, `description`, `builtin` and saved `settings` |
+| `modified` | no | the selected profile's keys that differ from it as saved |
+| `revert` | action | `true`: drops the unsaved changes |
+| `save_profile` | action | `true`: saves the changes into the selected profile; yours only, not a built-in |
+| `save_profile_as` | action | `"Rivo bridge"`: a new profile of yours from the current values, then selected |
+| `delete_profile` | action | one of your profiles; the selected or default one falls back to `ship` |
 | `test` | action | `center`, `detent`, `hardover` or `rumble`: plays that haptic once at its own strength, only while a mode runs; sent alone, changes and saves nothing |
 | `max_gain_pct` | yes | 0 … `gain_cap_pct` |
 | `spring_pct`, `damper_pct` | yes | 0 … 100 |
@@ -118,11 +130,11 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 
 Every change is republished on `configuration_json/moza_r21`.
 
-**Remembered between runs.** Every change made remotely is saved to a settings file, together with the behaviours the operator has saved, and read back at start-up. The default is `~/Library/Application Support/moza2keelson/<realm>-<entity>-<source>.json` on macOS and `~/.config/moza2keelson/` elsewhere; `--settings-file PATH` moves it, `--settings-file none` keeps nothing.
-- The mode is never restored: force feedback still starts off.
+**Remembered between runs.** The settings file holds the wheel's setup, the gain, your profiles and which profile is the default, and is read back at start-up. The default is `~/Library/Application Support/moza2keelson/<realm>-<entity>-<source>.json` on macOS and `~/.config/moza2keelson/` elsewhere; `--settings-file PATH` moves it, `--settings-file none` keeps nothing.
+- `enabled` is never saved: force feedback still starts off. Unsaved changes to a profile aren't saved either.
 - A saved gain above today's `--ffb-max-gain-pct` comes back as the cap.
-- A saved value that no longer passes the checks is dropped and logged; the rest still loads.
-- An explicit `--ffb-preset` is applied on top of the saved settings.
+- A saved profile that no longer passes the checks is dropped and logged; the rest still loads.
+- A file from before profiles is read too: its saved behaviours become profiles, and its tuned settings become the profile "Restored settings", made the default.
 
 ```bash
 .venv/bin/moza2keelson -e <vessel_id> -p r21-ultra-no-pedals --ffb-remote --ffb-max-gain-pct 15
@@ -274,7 +286,7 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
                     [--center-deadband-deg CENTER_DEADBAND_DEG]
                     [--wheel-lock-deg WHEEL_LOCK_DEG]
                     [--ffb {off,center,follow-up,detent}]
-                    [--ffb-preset {ship,hydraulic,follow-rudder,car,small-boat,jetski,notched,free}]
+                    [--ffb-profile FFB_PROFILE]
                     [--ffb-max-gain-pct FFB_MAX_GAIN_PCT]
                     [--ffb-spring-pct FFB_SPRING_PCT]
                     [--ffb-damper-pct FFB_DAMPER_PCT]

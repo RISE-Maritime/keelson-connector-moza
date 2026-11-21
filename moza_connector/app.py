@@ -8,7 +8,6 @@ import os
 import sys
 import threading
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import keelson
@@ -95,12 +94,19 @@ def parser() -> argparse.ArgumentParser:
     )
 
     f = p.add_argument_group("force feedback")
-    f.add_argument("--ffb", choices=[m.value for m in FfbMode], default=FfbMode.FOLLOW_UP.value, help="Mode")
     f.add_argument(
+        "--ffb",
+        choices=[m.value for m in FfbMode],
+        default=FfbMode.FOLLOW_UP.value,
+        help="Mode of the command-line profile; 'off' keeps force feedback off, any other switches it on "
+        "(not with --ffb-remote, which always starts off)",
+    )
+    f.add_argument(
+        "--ffb-profile",
         "--ffb-preset",
-        choices=list(model.PRESETS),
-        help="A named behaviour (mode, spring, damper, end stop, lock, clicks); it overrides those --ffb-* "
-        "settings and --wheel-lock-deg, never the gain",
+        dest="ffb_profile",
+        help="The profile to start in: a built-in (%s), command-line, or one saved in the settings file. "
+        "Default: the settings file's default profile, else command-line (the --ffb-* flags)" % ", ".join(model.PRESETS),
     )
     f.add_argument(
         "--ffb-max-gain-pct",
@@ -270,9 +276,11 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
 
         steering = prof.steering
         if args.ffb_remote and args.ffb != FfbMode.OFF.value:
-            log.info("--ffb-remote: force feedback starts off (not %s) until it is switched on remotely", args.ffb)
+            log.info("--ffb-remote: force feedback starts off until it is switched on remotely")
+        # The command-line profile: the --ffb-* flags, its mode never off (off is the switch).
+        feel = FfbMode.FOLLOW_UP if args.ffb == FfbMode.OFF.value else FfbMode(args.ffb)
         settings = FfbSettings(
-            mode=FfbMode(args.ffb),
+            mode=feel,
             max_gain_pct=args.ffb_max_gain_pct,
             spring_pct=args.ffb_spring_pct,
             damper_pct=args.ffb_damper_pct,
@@ -295,21 +303,29 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
             settings_path = store.default_path(args.realm, args.entity_id, args.source_id)
         elif args.settings_file not in ("auto", "none", ""):
             settings_path = Path(args.settings_file).expanduser()
-        user_presets: dict = {}
+        helm = model.Helm(
+            settings,
+            command_line=model.behaviour_of(settings),
+            enabled=not args.ffb_remote and args.ffb != FfbMode.OFF.value,
+        )
         if settings_path is not None:
             doc = store.read(settings_path)
             if doc is not None:
-                settings, user_presets, notes = model.load_state(doc, settings, gain_cap_pct=args.ffb_max_gain_pct)
+                helm, notes = model.load_state(doc, helm, gain_cap_pct=args.ffb_max_gain_pct)
                 for note in notes:
                     log.warning("Settings file %s: %s", settings_path, note)
-                log.info("Settings from %s (%d saved behaviours)", settings_path, len(user_presets))
-        if args.ffb_preset:
-            settings = model.apply_config(
-                settings, {"preset": args.ffb_preset}, gain_cap_pct=args.ffb_max_gain_pct, read_only={}
-            )
-            log.info("Preset %s: %s", args.ffb_preset, model.PRESETS[args.ffb_preset].description)
-        if args.ffb_remote:
-            settings = replace(settings, mode=FfbMode.OFF)
+                log.info("Settings from %s (%d profiles of yours)", settings_path, len(helm.user))
+        start_profile = args.ffb_profile or helm.default_profile
+        try:
+            helm = model.load_profile(helm, start_profile)
+        except ValueError as e:
+            if args.ffb_profile:
+                log.error("--ffb-profile: %s", e)
+                return EXIT_FAILED
+            log.warning("Default profile %s: %s; starting in %s", start_profile, e, model.COMMAND_LINE_LABEL)
+            helm = model.load_profile(helm, model.COMMAND_LINE)
+        log.info("Profile: %s", model.profile_label(helm, helm.profile))
+        settings = model.effective(helm)
         inputs = InputPublisher(
             put,
             prof,
@@ -390,44 +406,38 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                     "active": ffb.running,
                     "spring_source": ffb.spring_source,
                     "backend": "fake" if args.fake_device else devices.resolve_backend(args.backend),
-                    "presets": model.preset_list(user_presets),
                 }
 
             def get_config() -> dict:
-                current = ffb.settings
-                return {**model.config_of(current), "preset": model.matching_preset(current, user_presets), **read_only()}
+                return {**model.helm_config(helm), **read_only()}
 
             def set_config(patch: dict) -> None:
                 # Read-only keys are compared, not trusted: "active" and "spring_source"
                 # move on their own, so a stale round trip of them is ignored.
+                nonlocal helm
+                if not isinstance(patch, dict):
+                    raise ValueError("set_config expects a JSON object")
                 current = read_only()
                 fixed = {k: v for k, v in current.items() if k not in ("active", "spring_source")}
-                nonlocal user_presets
                 patch = {k: v for k, v in patch.items() if k not in ("active", "spring_source")}
-                save_as, delete = patch.pop("save_preset", None), patch.pop("delete_preset", None)
                 test = patch.pop("test", None)
                 if test is not None:
                     # Trying a haptic changes no setting, so nothing is saved.
-                    if patch or save_as is not None or delete is not None:
+                    if patch:
                         raise ValueError("'test' goes alone, not with settings")
                     ffb.test_pulse(str(test), time.monotonic())
                     return
-                new = model.apply_config(
-                    ffb.settings, patch, gain_cap_pct=args.ffb_max_gain_pct, read_only=fixed, user_presets=user_presets
-                )
-                if new.mode is not FfbMode.OFF and not dev.has_ff():
+                new = model.apply_helm(helm, patch, gain_cap_pct=args.ffb_max_gain_pct, read_only=fixed)
+                if new.enabled and not dev.has_ff():
                     raise ValueError(f"{dev.name} has no force feedback")
-                presets = user_presets
-                if delete is not None:
-                    presets = model.delete_behaviour(delete, presets)
-                if save_as is not None:
-                    presets = model.save_behaviour(save_as, new, presets)
-                log.info("set_config %s%s%s", patch, f" save {save_as!r}" if save_as else "", f" delete {delete!r}" if delete else "")
-                ffb.update(new, time.monotonic())
-                inputs.set_steering(new.lock_fraction, new.deadband_pct, time.monotonic())
-                user_presets = presets
+                log.info("set_config %s", patch)
+                if new.profile != helm.profile:
+                    log.info("Profile: %s", model.profile_label(new, new.profile))
+                ffb.update(model.effective(new), time.monotonic())
+                inputs.set_steering(new.settings.lock_fraction, new.settings.deadband_pct, time.monotonic())
+                helm = new
                 if settings_path is not None:
-                    store.write(settings_path, model.saved_state(new, user_presets))
+                    store.write(settings_path, model.saved_state(helm))
 
             make_configurable(session, args.realm, args.entity_id, args.source_id, get_config, set_config)
             subjects.append("configuration_json")

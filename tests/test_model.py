@@ -243,43 +243,94 @@ def test_detent_mode_has_no_spring_and_rudder_order_scale():
     assert model.CLICK_DURATION_MS < 1000  # always inside an HID lease
 
 
-# --- Behaviour presets ---------------------------------------------------------------------
+# --- Profiles ------------------------------------------------------------------------------
+
+
+def helm(**kw):
+    s = FfbSettings(mode=model.FfbMode.CENTER, max_gain_pct=12, **kw)
+    return model.Helm(s, command_line=model.behaviour_of(s))
+
+
+def apply(h, patch, cap=30):
+    return model.apply_helm(h, patch, gain_cap_pct=cap, read_only={})
 
 
 @pytest.mark.parametrize("name", list(model.PRESETS))
-def test_every_preset_is_a_valid_patch_and_is_recognised(name):
-    s = FfbSettings(max_gain_pct=12)
-    new = model.apply_config(s, {"preset": name}, gain_cap_pct=30, read_only={})
-    assert model.matching_preset(new) == name
-    assert new.max_gain_pct == 12  # a preset never touches the gain
+def test_every_builtin_profile_is_complete_valid_and_leaves_the_gain(name):
+    h = model.load_profile(helm(), name)
+    values = model.profile_settings(h, name)
+    assert set(values) == set(model.BEHAVIOUR_KEYS) and values["mode"] != "off"
+    assert model.behaviour_of(h.settings) == values and model.modified(h) == []
+    assert h.settings.max_gain_pct == 12  # a profile never touches the gain
     assert "max_gain_pct" not in model.PRESETS[name].settings
 
 
-def test_preset_lock_fits_a_small_base():
-    s = FfbSettings(base_range_deg=180, wheel_lock_deg=90)
-    assert model.apply_config(s, {"preset": "car"}, gain_cap_pct=30, read_only={}).wheel_lock_deg == 90
-    assert model.apply_config(s, {"preset": "ship"}, gain_cap_pct=30, read_only={}).wheel_lock_deg == 90  # "full"
-    # A base range in the same patch is the one the lock is fitted to.
-    both = model.apply_config(s, {"preset": "ship", "base_range_deg": 540}, gain_cap_pct=30, read_only={})
-    assert both.wheel_lock_deg == 270
+def test_a_builtin_profile_sets_the_haptics_too():
+    h = apply(helm(alarm_rumble_pct=50, hardover_warn_deg=20), {"profile": "ship"})
+    assert (h.settings.alarm_rumble_pct, h.settings.hardover_warn_deg) == (0, 0)
 
 
-def test_preset_explicit_keys_win_and_round_trips_change_nothing():
-    s = FfbSettings()
-    new = model.apply_config(s, {"preset": "small-boat", "damper_pct": 33}, gain_cap_pct=30, read_only={})
-    assert new.damper_pct == 33 and new.wheel_lock_deg == 90
-    assert model.matching_preset(new) == "custom"
-    assert model.apply_config(new, {"preset": "custom"}, gain_cap_pct=30, read_only={}) == new
-    boat = model.apply_config(s, {"preset": "small-boat"}, gain_cap_pct=30, read_only={})
-    doc = {**model.config_of(boat), "preset": "small-boat"}
-    assert model.apply_config(boat, doc, gain_cap_pct=30, read_only={}) == boat
-    with pytest.raises(ValueError, match="unknown preset"):
-        model.apply_config(s, {"preset": "rocket"}, gain_cap_pct=30, read_only={})
+def test_profile_lock_fits_a_small_base():
+    h = helm(base_range_deg=180, wheel_lock_deg=90)
+    assert apply(h, {"profile": "car"}).settings.wheel_lock_deg == 90
+    assert apply(h, {"profile": "ship"}).settings.wheel_lock_deg == 90  # "full"
+    with pytest.raises(ValueError, match="unknown profile"):
+        apply(h, {"profile": "rocket"})
 
 
-def test_preset_is_shown_while_off():
-    s = model.apply_config(FfbSettings(), {"preset": "notched"}, gain_cap_pct=30, read_only={})
-    assert model.matching_preset(replace(s, mode=model.FfbMode.OFF)) == "notched"
+def test_modified_tracks_changes_and_revert_drops_them():
+    h = apply(helm(), {"profile": "small-boat", "damper_pct": 33})
+    assert (h.profile, h.settings.damper_pct, model.modified(h)) == ("small-boat", 33, ["damper_pct"])
+    assert apply(h, {"max_gain_pct": 20}).settings.max_gain_pct == 20
+    assert model.modified(apply(h, {"max_gain_pct": 20})) == ["damper_pct"]  # the gain is no profile's
+    assert apply(h, {"profile": "small-boat"}) == h  # the selected profile again: a round trip, no reload
+    back = apply(h, {"revert": True})
+    assert model.modified(back) == [] and back.settings.damper_pct == 10
+    doc = model.helm_config(h)
+    assert apply(h, {k: v for k, v in doc.items()}) == h  # get_config sent back changes nothing
+
+
+def test_save_as_selects_save_overwrites_only_your_own():
+    h = apply(helm(), {"profile": "car", "spring_pct": 70})
+    with pytest.raises(ValueError, match="built in"):
+        apply(h, {"save_profile": True})
+    mine = apply(h, {"save_profile_as": "Rivo  bridge"})
+    assert (mine.profile, mine.user["rivo-bridge"].label, model.modified(mine)) == ("rivo-bridge", "Rivo bridge", [])
+    assert mine.user["rivo-bridge"].settings["spring_pct"] == 70 and "max_gain_pct" not in mine.user["rivo-bridge"].settings
+    tuned = apply(mine, {"damper_pct": 55, "save_profile": True})
+    assert tuned.user["rivo-bridge"].settings["damper_pct"] == 55 and model.modified(tuned) == []
+    with pytest.raises(ValueError, match="exists already"):
+        apply(tuned, {"save_profile_as": "rivo bridge"})
+    with pytest.raises(ValueError, match="built-in"):
+        apply(tuned, {"save_profile_as": "Car"})
+    listed = {p["name"]: p["builtin"] for p in model.profile_list(tuned)}
+    assert listed["rivo-bridge"] is False and listed["car"] is True and listed[model.COMMAND_LINE] is True
+
+
+def test_delete_falls_back_and_builtins_stay():
+    h = apply(apply(helm(), {"save_profile_as": "mine"}), {"default_profile": "mine"})
+    assert h.default_profile == "mine"
+    gone = apply(h, {"delete_profile": "mine"})
+    assert (gone.user, gone.default_profile, gone.profile) == ({}, model.FALLBACK_PROFILE, model.FALLBACK_PROFILE)
+    with pytest.raises(ValueError, match="built in"):
+        apply(h, {"delete_profile": "car"})
+    with pytest.raises(ValueError, match="unknown profile"):
+        apply(h, {"default_profile": "rocket"})
+
+
+def test_on_off_is_a_switch_and_the_mode_is_the_profiles():
+    h = helm()
+    assert not h.enabled and model.effective(h).mode is model.FfbMode.OFF
+    on = apply(h, {"enabled": True})
+    assert model.effective(on).mode is model.FfbMode.CENTER
+    detent = apply(h, {"mode": "detent"})
+    assert not detent.enabled and detent.settings.mode is model.FfbMode.DETENT  # a mode never switches on
+    off = apply(on, {"mode": "off"})  # Stop, and old clients
+    assert not off.enabled and off.settings.mode is model.FfbMode.CENTER
+    with pytest.raises(ValueError, match="contradict"):
+        apply(h, {"mode": "off", "enabled": True})
+    with pytest.raises(ValueError, match="true or false"):
+        apply(h, {"enabled": "yes"})
 
 
 def test_center_mark_on_arriving_or_passing_never_on_leaving():
@@ -328,53 +379,44 @@ def test_apply_config_deadband_and_boost():
         model.apply_config(s, {"spring_boost": 4}, gain_cap_pct=30, read_only={})
 
 
-# --- Remembered settings and the operator's own behaviours ---------------------------------
+# --- The settings file ---------------------------------------------------------------------
 
 
-def test_save_and_delete_a_behaviour():
-    s = FfbSettings(mode=model.FfbMode.CENTER, spring_pct=70, wheel_lock_deg=90, max_gain_pct=12)
-    user = model.save_behaviour("Rivo  bridge", s, {})
-    (slug,) = user
-    assert slug == "rivo-bridge" and user[slug].label == "Rivo bridge"
-    assert user[slug].settings["spring_pct"] == 70 and "max_gain_pct" not in user[slug].settings
-    assert model.matching_preset(s, user) == "rivo-bridge"
-    listed = {p["name"]: p["custom"] for p in model.preset_list(user)}
-    assert listed["rivo-bridge"] is True and listed["car"] is False
-    # Applied from elsewhere, it brings the behaviour back but not the gain.
-    other = model.apply_config(FfbSettings(max_gain_pct=5), {"preset": "rivo-bridge"}, gain_cap_pct=30,
-                               read_only={}, user_presets=user)
-    assert (other.spring_pct, other.wheel_lock_deg, other.max_gain_pct) == (70, 90, 5)
-    assert model.delete_behaviour("rivo-bridge", user) == {}
-    with pytest.raises(ValueError, match="built in"):
-        model.delete_behaviour("car", user)
-    with pytest.raises(ValueError, match="built-in"):
-        model.save_behaviour("Car", s, user)
-
-
-def test_saving_while_off_keeps_no_mode():
-    user = model.save_behaviour("quiet", FfbSettings(mode=model.FfbMode.OFF), {})
-    assert "mode" not in user["quiet"].settings
-
-
-def test_saved_state_round_trip_never_restores_the_mode():
-    s = FfbSettings(mode=model.FfbMode.DETENT, spring_pct=33, center_mark_pct=10, max_gain_pct=14)
-    user = model.save_behaviour("mine", s, {})
-    doc = json.loads(json.dumps(model.saved_state(s, user)))
-    back, back_user, notes = model.load_state(doc, FfbSettings(mode=model.FfbMode.OFF), gain_cap_pct=15)
-    assert notes == []
-    assert back.mode is model.FfbMode.OFF
-    assert (back.spring_pct, back.center_mark_pct, back.max_gain_pct) == (33, 10, 14)
-    assert set(back_user) == {"mine"}
+def test_saved_state_round_trip_never_restores_on_nor_unsaved_changes():
+    h = apply(helm(), {"profile": "notched", "spring_pct": 33, "max_gain_pct": 14, "save_profile_as": "mine"})
+    h = apply(h, {"default_profile": "mine", "enabled": True, "damper_pct": 77})  # the damper never saved
+    doc = json.loads(json.dumps(model.saved_state(h)))
+    assert "enabled" not in json.dumps(doc) and doc["version"] == 2
+    back, notes = model.load_state(doc, helm(), gain_cap_pct=15)
+    assert notes == [] and (back.default_profile, set(back.user)) == ("mine", {"mine"})
+    back = model.load_profile(back, back.default_profile)
+    assert not back.enabled
+    assert (back.settings.spring_pct, back.settings.damper_pct, back.settings.max_gain_pct) == (33, 0, 14)
 
 
 def test_load_state_clamps_gain_and_drops_what_no_longer_passes():
-    doc = {"settings": {"max_gain_pct": 40, "spring_pct": 50},
-           "presets": {"car": {"label": "x", "settings": {}}, "ok": {"label": "OK", "settings": {"spring_pct": 900}}}}
-    back, user, notes = model.load_state(doc, FfbSettings(), gain_cap_pct=15)
-    assert back.max_gain_pct == 15 and back.spring_pct == 50
-    assert user == {} and len(notes) == 3
-    same, _, notes = model.load_state(["not", "a", "dict"], FfbSettings(), gain_cap_pct=15)
-    assert same == FfbSettings() and notes
+    doc = {"version": 2, "setup": {"max_gain_pct": 40}, "default_profile": "gone",
+           "profiles": {"car": {"label": "x", "settings": {}}, "ok": {"label": "OK", "settings": {"spring_pct": 900}}}}
+    back, notes = model.load_state(doc, helm(), gain_cap_pct=15)
+    assert back.settings.max_gain_pct == 15 and back.user == {} and back.default_profile == model.COMMAND_LINE
+    assert len(notes) == 4
+    same, notes = model.load_state(["not", "a", "dict"], helm(), gain_cap_pct=15)
+    assert same == helm() and notes
+
+
+def test_a_version_1_file_keeps_what_was_tuned():
+    doc = {"settings": {"mode": "detent", "max_gain_pct": 12, "spring_pct": 81, "alarm_rumble_pct": 36},
+           "presets": {"rivo-bridge": {"label": "Rivo bridge", "settings": {"damper_pct": 44}}}}
+    back, notes = model.load_state(doc, helm(), gain_cap_pct=15)
+    assert back.default_profile == model.RESTORED and len(notes) == 1
+    restored = model.load_profile(back, model.RESTORED)
+    assert (restored.settings.spring_pct, restored.settings.alarm_rumble_pct) == (81, 36)
+    assert restored.settings.mode is model.FfbMode.CENTER and not restored.enabled  # the command line's mode
+    bridge = back.user["rivo-bridge"].settings  # completed from the defaults, its mode never off
+    assert set(bridge) == set(model.BEHAVIOUR_KEYS) and bridge["damper_pct"] == 44 and bridge["mode"] != "off"
+    # Settings that are already a profile add nothing.
+    plain, notes = model.load_state({"settings": {"spring_pct": 60}}, helm(), gain_cap_pct=15)
+    assert plain.user == {} and notes == []
 
 
 # --- Haptics ----------------------------------------------------------------------------

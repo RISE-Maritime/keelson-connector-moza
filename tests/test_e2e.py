@@ -223,12 +223,15 @@ def test_remote_force_feedback_over_configurable(h):
 
         ok, body = rpc(h, "get_config")
         cfg = json.loads(body)
-        assert ok and cfg["mode"] == "off" and cfg["active"] is False and cfg["gain_cap_pct"] == 20
+        assert ok and cfg["enabled"] is False and cfg["active"] is False and cfg["gain_cap_pct"] == 20
         time.sleep(0.3)
         assert h.ff() == []  # --ffb-remote starts off whatever --ffb says
 
         ok, _ = rpc(h, "set_config", json.dumps({"mode": "center", "max_gain_pct": 10}).encode())
         assert ok
+        time.sleep(0.3)
+        assert h.ff() == []  # a mode is the profile's: it does not switch force feedback on
+        assert rpc(h, "set_config", json.dumps({"enabled": True}).encode())[0]
         wait(lambda: any(e[0] == "upload" and e[1] == codes.FF_SPRING for e in h.ff()), what="the spring")
         wait(lambda: ("gain", model.gain_level(10)) in h.ff(), what="the gain to ramp to 10%")
         g = [e[1] for e in h.ff() if e[0] == "gain"]
@@ -246,7 +249,7 @@ def test_remote_force_feedback_over_configurable(h):
         assert ff[-1] == ("gain", 0)
         wait(lambda: len(published) >= 3, what="configuration_json")
         last = json.loads(TimestampedString.FromString(keelson.uncover(published[-1].payload.to_bytes())[2]).value)
-        assert last["mode"] == "off" and last["active"] is False
+        assert last["enabled"] is False and last["mode"] == "center" and last["active"] is False
     finally:
         sub.undeclare()
 
@@ -331,40 +334,52 @@ def test_rudder_sim_follows_the_wheel_and_returns_when_it_goes_silent(h):
     assert "returns to amidships" in out
 
 
-def test_remote_preset_switches_behaviour(h):
-    h.start([], "--ffb-remote", "--ffb-max-gain-pct", "20", "--ffb-preset", "car")
+def test_remote_profile_switches_behaviour(h):
+    h.start([], "--ffb-remote", "--ffb-max-gain-pct", "20", "--ffb-profile", "car")
     key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
     wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
     cfg = json.loads(rpc(h, "get_config")[1])
-    assert cfg["mode"] == "off" and cfg["preset"] == "car"  # loaded, not on: --ffb-remote starts off
-    assert [p["name"] for p in cfg["presets"]] == list(model.PRESETS)
+    assert (cfg["profile"], cfg["mode"], cfg["enabled"], cfg["modified"]) == ("car", "center", False, [])
+    assert [p["name"] for p in cfg["profiles"]] == [*model.PRESETS, model.COMMAND_LINE]
 
-    ok, _ = rpc(h, "set_config", json.dumps({"preset": "notched"}).encode())
+    assert rpc(h, "set_config", json.dumps({"enabled": True, "max_gain_pct": 10}).encode())[0]
+    wait(lambda: ("gain", model.gain_level(10)) in h.ff(), what="the gain to ramp to 10%")
+    ok, _ = rpc(h, "set_config", json.dumps({"profile": "notched"}).encode())
     assert ok
     cfg = json.loads(rpc(h, "get_config")[1])
-    assert (cfg["preset"], cfg["mode"], cfg["active"], cfg["wheel_lock_deg"]) == ("notched", "detent", True, 90.0)
+    assert (cfg["profile"], cfg["mode"], cfg["active"], cfg["wheel_lock_deg"]) == ("notched", "detent", True, 90.0)
     wait(lambda: any(e[0] == "click" for e in h.ff()), what="the detent click uploaded")
-    assert not any(e[0] == "upload" and e[1] == codes.FF_SPRING and e[6] == 0 for e in h.ff())  # no centring spring
+    gains = [e[1] for e in h.ff() if e[0] == "gain"]
+    assert 0 in gains[gains.index(model.gain_level(10)):]  # the lock changed while running: ramps in again
+    assert rpc(h, "set_config", json.dumps({"enabled": False}).encode())[0]
+    ff = h.ff()
+    assert effect_ids(ff) == {e[1] for e in ff if e[0] == "erase"} and ff[-1] == ("gain", 0)
 
 
-def test_settings_and_saved_behaviours_survive_a_restart(h):
+def test_profiles_and_the_default_survive_a_restart(h):
     path = h.tmp / "settings.json"
     h.start([], "--ffb-remote", "--ffb-max-gain-pct", "20", "--settings-file", str(path))
     key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
     wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
-    assert rpc(h, "set_config", json.dumps({"spring_pct": 33, "max_gain_pct": 12}).encode())[0]
-    assert rpc(h, "set_config", json.dumps({"save_preset": "Rivo bridge"}).encode())[0]
+    assert rpc(h, "set_config", json.dumps({"profile": "car", "spring_pct": 33, "max_gain_pct": 12}).encode())[0]
+    assert json.loads(rpc(h, "get_config")[1])["modified"] == ["spring_pct"]
+    ok, err = rpc(h, "set_config", json.dumps({"save_profile": True}).encode())
+    assert not ok and "built in" in err
+    assert rpc(h, "set_config", json.dumps({"save_profile_as": "Rivo bridge", "enabled": True}).encode())[0]
+    assert rpc(h, "set_config", json.dumps({"default_profile": "rivo-bridge"}).encode())[0]
+    assert rpc(h, "set_config", json.dumps({"damper_pct": 70}).encode())[0]  # never saved: lost on restart
     saved = json.loads(path.read_text())
-    assert saved["settings"]["spring_pct"] == 33 and "mode" not in saved["settings"]
-    assert "rivo-bridge" in saved["presets"]
+    assert saved["version"] == 2 and saved["default_profile"] == "rivo-bridge"
+    assert saved["profiles"]["rivo-bridge"]["settings"]["spring_pct"] == 33 and "enabled" not in json.dumps(saved)
 
     h.proc.send_signal(signal.SIGTERM)
     assert h.proc.wait(timeout=10) == 0
     h.start([], "--ffb-remote", "--ffb-max-gain-pct", "20", "--settings-file", str(path))
     wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1 again")
     cfg = json.loads(rpc(h, "get_config")[1])
-    assert (cfg["spring_pct"], cfg["max_gain_pct"], cfg["mode"], cfg["active"]) == (33, 12, "off", False)
-    assert any(p["name"] == "rivo-bridge" and p["custom"] for p in cfg["presets"])
+    assert (cfg["profile"], cfg["spring_pct"], cfg["damper_pct"], cfg["max_gain_pct"]) == ("rivo-bridge", 33, 15, 12)
+    assert (cfg["enabled"], cfg["active"], cfg["modified"]) == (False, False, [])
+    assert any(p["name"] == "rivo-bridge" and not p["builtin"] for p in cfg["profiles"])
 
 
 def test_remote_test_pulse_plays_and_saves_nothing(h):
@@ -375,7 +390,7 @@ def test_remote_test_pulse_plays_and_saves_nothing(h):
     ok, err = rpc(h, "set_config", json.dumps({"test": "hardover"}).encode())
     assert not ok and "choose a mode" in err  # off: nothing to feel
 
-    assert rpc(h, "set_config", json.dumps({"mode": "center", "max_gain_pct": 10}).encode())[0]
+    assert rpc(h, "set_config", json.dumps({"mode": "center", "enabled": True, "max_gain_pct": 10}).encode())[0]
     path.unlink()
     assert rpc(h, "set_config", json.dumps({"test": "hardover"}).encode())[0]
     wait(lambda: any(e[0] == "click" and e[4] == model.HARDOVER_MS for e in h.ff()), what="the hard-over pulse")

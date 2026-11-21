@@ -7,7 +7,7 @@ so it is tested without a wheel, a bus or a sleep.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 # --- Axes -----------------------------------------------------------------------------
@@ -269,7 +269,7 @@ def config_of(settings: FfbSettings) -> dict:
 
 
 def apply_config(
-    settings: FfbSettings, patch: dict, *, gain_cap_pct: float, read_only: dict, user_presets: dict | None = None
+    settings: FfbSettings, patch: dict, *, gain_cap_pct: float, read_only: dict
 ) -> FfbSettings:
     """``settings`` with a remote ``set_config`` patch applied, or ValueError.
 
@@ -280,7 +280,6 @@ def apply_config(
     """
     if not isinstance(patch, dict):
         raise ValueError("set_config expects a JSON object")
-    patch = expand_preset(settings, patch, user_presets)
     cap = min(gain_cap_pct, MAX_GAIN_CEILING_PCT)
     changes: dict = {}
     for key, value in patch.items():
@@ -480,18 +479,12 @@ PRESETS = {
 }
 
 
-def all_presets(user: dict | None = None) -> dict:
-    """The built-in presets, then the operator's own (``user``: slug -> Preset)."""
-    return {**PRESETS, **(user or {})}
-
-
-def preset_patch(name: str, base_range_deg: float, user: dict | None = None) -> dict:
-    """The set_config patch a preset stands for, on a base of ``base_range_deg``."""
-    presets = all_presets(user)
+def preset_patch(name: str, base_range_deg: float) -> dict:
+    """The settings a built-in preset sets, on a base of ``base_range_deg``."""
     try:
-        preset = presets[name]
+        preset = PRESETS[name]
     except KeyError:
-        raise ValueError(f"unknown preset {name!r} (known: {', '.join(presets)})") from None
+        raise ValueError(f"unknown preset {name!r} (known: {', '.join(PRESETS)})") from None
     patch = dict(preset.settings)
     lock = patch.get("wheel_lock_deg")
     if lock is not None:
@@ -499,68 +492,109 @@ def preset_patch(name: str, base_range_deg: float, user: dict | None = None) -> 
     return patch
 
 
-def expand_preset(settings: FfbSettings, patch: dict, user: dict | None = None) -> dict:
-    """A set_config patch with its ``preset`` (if any) unfolded; the patch's own keys win.
+# --- Profiles: how the wheel behaves, built in or the operator's own --------------------
 
-    ``"custom"``, or the preset the settings already match, changes nothing: that is a
-    get_config document sent back as it came.
-    """
-    if "preset" not in patch:
-        return patch
-    rest = {k: v for k, v in patch.items() if k != "preset"}
-    name = patch["preset"]
-    if name in ("custom", matching_preset(settings, user)):
-        return rest
-    base = rest.get("base_range_deg", settings.base_range_deg)
-    return {**preset_patch(name, base, user), **rest}
-
-
-def matching_preset(settings: FfbSettings, user: dict | None = None) -> str:
-    """The preset the settings are, or ``"custom"``. With force feedback off its mode is not
-    compared, so the panel still shows which behaviour is loaded."""
-    current = config_of(settings)
-    for name in all_presets(user):
-        patch = preset_patch(name, settings.base_range_deg, user)
-        if settings.mode is FfbMode.OFF:
-            patch.pop("mode", None)
-        if all(current.get(k) == v for k, v in patch.items()):
-            return name
-    return "custom"
-
-
-def preset_list(user: dict | None = None) -> list[dict]:
-    """What get_config offers: each preset's name, label and description; the operator's
-    own marked ``custom``."""
-    return [
-        {"name": n, "label": p.label, "description": p.description, "custom": n not in PRESETS}
-        for n, p in all_presets(user).items()
-    ]
-
-
-# --- The operator's own behaviours, and what is remembered between runs ----------------
-
-#: What a saved behaviour keeps: how the wheel behaves, not the gain (the operator's
-#: strength, under the cap), the base's range or the rudder feed's details.
+#: What a profile holds: everything that shapes how the wheel behaves, its mode included.
+#: Not the gain (the operator's strength, under the cap) nor the wheel's setup.
 BEHAVIOUR_KEYS = (
     "mode", "spring_pct", "spring_boost", "damper_pct", "endstop_pct", "wheel_lock_deg",
     "center_deadband_deg", "rudder_max_deg", "detent_deg", "detent_pct", "center_mark_pct",
     "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct", "alarm_rumble_pct",
     "alarm_min_priority", "lag_resistance_pct",
 )
+#: The wheel's setup: it belongs to this wheel, not to a profile, and is always remembered.
+SETUP_KEYS = ("max_gain_pct", "base_range_deg", "rudder_invert", "stale_s")
+#: The built-in profile made of the command line's behaviour flags.
+COMMAND_LINE = "command-line"
+COMMAND_LINE_LABEL = "Command line"
+#: Where a deleted default or selected profile falls back to.
+FALLBACK_PROFILE = "ship"
+#: Keys get_config reports that set_config ignores: they follow from the rest.
+DERIVED_KEYS = ("profiles", "modified")
+#: What set_config does besides changing settings.
+PROFILE_ACTIONS = ("enabled", "profile", "revert", "save_profile", "save_profile_as", "delete_profile", "default_profile")
 
 
-def preset_slug(name: str) -> str:
-    """A behaviour's name as its key: lower case, words joined by dashes."""
-    slug = "-".join("".join(c if c.isalnum() else " " for c in str(name).lower()).split())
-    if not slug or len(slug) > 40:
-        raise ValueError("a behaviour's name must have 1..40 letters or digits")
-    if slug in PRESETS or slug == "custom":
-        raise ValueError(f"{name!r} is a built-in behaviour's name")
-    return slug
+def behaviour_of(settings: FfbSettings) -> dict:
+    """A profile's values: the behaviour keys of ``settings``."""
+    current = config_of(settings)
+    return {k: current[k] for k in BEHAVIOUR_KEYS}
+
+
+def _feel(values: dict) -> dict:
+    """A profile's mode is never ``off``: off is force feedback's switch, not a behaviour."""
+    if values.get("mode") in (None, FfbMode.OFF.value):
+        return {**values, "mode": FfbSettings().mode.value}
+    return values
+
+
+@dataclass(frozen=True)
+class Helm:
+    """The wheel's force feedback as the operator sees it: the profile being tuned (its
+    values in ``settings``, mode included, never OFF), whether force feedback is on, which
+    profile is selected and which is the default, the operator's own profiles, and the
+    command line's. ``enabled`` is never saved: force feedback always starts off."""
+
+    settings: FfbSettings
+    profile: str = COMMAND_LINE
+    default_profile: str = COMMAND_LINE
+    user: dict = field(default_factory=dict)  # slug -> Preset with complete settings
+    command_line: dict = field(default_factory=dict)  # the command-line profile's values
+    enabled: bool = False
+
+
+def builtin_profiles() -> tuple[str, ...]:
+    return (*PRESETS, COMMAND_LINE)
+
+
+def profile_names(helm: Helm) -> list[str]:
+    """Every profile: the built-ins, then the operator's own."""
+    return [*builtin_profiles(), *helm.user]
+
+
+def profile_label(helm: Helm, name: str) -> str:
+    if name == COMMAND_LINE:
+        return COMMAND_LINE_LABEL
+    if name in PRESETS:
+        return PRESETS[name].label
+    return helm.user[name].label if name in helm.user else name
+
+
+def profile_settings(helm: Helm, name: str) -> dict:
+    """Profile ``name``'s complete values, on this wheel. A built-in preset is the defaults
+    with its own settings over them, so choosing one sets every behaviour key; a lock is
+    pulled in to the base's own end."""
+    base = helm.settings.base_range_deg
+    if name == COMMAND_LINE:
+        values = dict(helm.command_line)
+    elif name in PRESETS:
+        values = {**behaviour_of(FfbSettings()), **preset_patch(name, base)}
+    elif name in helm.user:
+        values = dict(helm.user[name].settings)
+    else:
+        raise ValueError(f"unknown profile {name!r} (known: {', '.join(profile_names(helm))})")
+    if "wheel_lock_deg" in values:
+        values["wheel_lock_deg"] = min(float(values["wheel_lock_deg"]), base / 2.0)
+    return _feel(values)
+
+
+def effective(helm: Helm) -> FfbSettings:
+    """What the base gets: the profile's settings, with mode OFF unless force feedback is on."""
+    return helm.settings if helm.enabled else replace(helm.settings, mode=FfbMode.OFF)
+
+
+def modified(helm: Helm) -> list[str]:
+    """The behaviour keys that differ from the selected profile as saved."""
+    try:
+        saved = profile_settings(helm, helm.profile)
+    except ValueError:
+        return list(BEHAVIOUR_KEYS)
+    current = behaviour_of(helm.settings)
+    return [k for k in BEHAVIOUR_KEYS if k in saved and current[k] != saved[k]]
 
 
 def describe_behaviour(settings: dict) -> str:
-    """A one-line summary of a saved behaviour, for its tooltip."""
+    """A one-line summary of a saved profile, for its tooltip."""
     mode = {"center": "Centre", "follow-up": "Follow-up", "detent": "Free"}.get(settings.get("mode"), "Mode unchanged")
     parts = [mode]
     if settings.get("mode") in ("center", "follow-up"):
@@ -568,68 +602,209 @@ def describe_behaviour(settings: dict) -> str:
     parts += [f"damper {settings.get('damper_pct', 0):g} %", f"full lock {settings.get('wheel_lock_deg', 0):g} deg"]
     if settings.get("mode") == "detent" and settings.get("detent_pct"):
         parts.append(f"a click each {settings.get('detent_deg', 0):g} deg")
-    return "Saved: " + ", ".join(parts) + "."
+    return "Yours: " + ", ".join(parts) + "."
 
 
-def save_behaviour(name: str, settings: FfbSettings, user: dict | None) -> dict:
-    """The operator's presets with the current behaviour saved as ``name``. With force
-    feedback off its mode is not kept, so choosing it later does not switch the wheel on."""
-    slug = preset_slug(name)
-    current = config_of(settings)
-    kept = {k: current[k] for k in BEHAVIOUR_KEYS if k in current}
-    if settings.mode is FfbMode.OFF:
-        kept.pop("mode")
-    label = " ".join(str(name).split())[:40]
-    return {**(user or {}), slug: Preset(label, describe_behaviour(kept), kept)}
+def profile_list(helm: Helm) -> list[dict]:
+    """What get_config offers: each profile's name, label, description, whether it is built
+    in, and its saved values (so the panel can show what changed)."""
+    out = []
+    for name in profile_names(helm):
+        if name == COMMAND_LINE:
+            description = "The settings moza2keelson was started with."
+        elif name in PRESETS:
+            description = PRESETS[name].description
+        else:
+            description = helm.user[name].description
+        out.append({
+            "name": name,
+            "label": profile_label(helm, name),
+            "description": description,
+            "builtin": name not in helm.user,
+            "settings": profile_settings(helm, name),
+        })
+    return out
 
 
-def delete_behaviour(name: str, user: dict | None) -> dict:
-    """The operator's presets without ``name``. A built-in cannot be deleted."""
-    if name in PRESETS:
-        raise ValueError(f"{name!r} is built in and cannot be deleted")
-    if name not in (user or {}):
-        raise ValueError(f"no saved behaviour {name!r}")
-    return {k: v for k, v in user.items() if k != name}
+def helm_config(helm: Helm) -> dict:
+    """get_config's document (without the read-only keys the app adds)."""
+    return {
+        **config_of(helm.settings),
+        "enabled": helm.enabled,
+        "profile": helm.profile,
+        "default_profile": helm.default_profile,
+        "modified": modified(helm),
+        "profiles": profile_list(helm),
+    }
 
 
-def saved_state(settings: FfbSettings, user: dict | None) -> dict:
-    """What is written to the settings file: every writable setting but the mode (force
-    feedback always starts off), and the operator's behaviours."""
-    kept = {k: v for k, v in config_of(settings).items() if k != "mode"}
-    presets = {n: {"label": p.label, "description": p.description, "settings": p.settings} for n, p in (user or {}).items()}
-    return {"settings": kept, "presets": presets}
+def preset_slug(name: str) -> str:
+    """A profile's name as its key: lower case, words joined by dashes."""
+    slug = "-".join("".join(c if c.isalnum() else " " for c in str(name).lower()).split())
+    if not slug or len(slug) > 40:
+        raise ValueError("a profile's name must have 1..40 letters or digits")
+    if slug in builtin_profiles() or slug == "custom":
+        raise ValueError(f"{name!r} is a built-in profile's name")
+    return slug
 
 
-def load_state(doc, settings: FfbSettings, *, gain_cap_pct: float) -> tuple[FfbSettings, dict, list[str]]:
-    """Settings and behaviours from a settings file, or the given settings and a reason.
+def load_profile(helm: Helm, name: str) -> Helm:
+    """``helm`` with profile ``name`` selected and its values loaded: unsaved changes go."""
+    values = profile_settings(helm, name)
+    settings = apply_config(helm.settings, values, gain_cap_pct=MAX_GAIN_CEILING_PCT, read_only={})
+    return replace(helm, settings=settings, profile=name)
 
-    The mode is never restored. A saved gain above today's cap comes back as the cap. A
-    setting or behaviour that no longer passes the checks is dropped, and said why.
+
+def _saved(label: str, settings: FfbSettings) -> Preset:
+    values = behaviour_of(settings)
+    return Preset(" ".join(str(label).split())[:40], describe_behaviour(values), values)
+
+
+def apply_helm(helm: Helm, patch: dict, *, gain_cap_pct: float, read_only: dict) -> Helm:
+    """``helm`` after a set_config ``patch``, or ValueError (and nothing changed).
+
+    In order: a profile is loaded (``profile``, unless it is the selected one, or ``revert``);
+    settings change (``apply_config``'s checks); the profile is saved (``save_profile``, the
+    operator's own only) or saved as a new one, which is then selected (``save_profile_as``);
+    a profile is deleted (``delete_profile``); the default is set (``default_profile``);
+    force feedback is switched (``enabled``; ``mode: off`` is the same as ``enabled: false``,
+    and another mode changes the profile's mode without switching it on).
+    """
+    if not isinstance(patch, dict):
+        raise ValueError("set_config expects a JSON object")
+    patch = {k: v for k, v in patch.items() if k not in DERIVED_KEYS}
+    act = {k: patch.pop(k) for k in PROFILE_ACTIONS if k in patch}
+    if patch.get("mode") == FfbMode.OFF.value:
+        patch.pop("mode")
+        if act.get("enabled") is True:
+            raise ValueError("mode off and enabled true contradict each other")
+        act["enabled"] = False
+    if "enabled" in act and not isinstance(act["enabled"], bool):
+        raise ValueError(f"enabled must be true or false, got {act['enabled']!r}")
+
+    new = helm
+    target = act.get("profile")
+    if target is not None and act.get("revert"):
+        raise ValueError("profile and revert go one at a time")
+    if target is not None and target != helm.profile:
+        new = load_profile(new, str(target))
+    elif act.get("revert"):
+        new = load_profile(new, new.profile)
+
+    if patch:
+        new = replace(new, settings=apply_config(new.settings, patch, gain_cap_pct=gain_cap_pct, read_only=read_only))
+
+    if act.get("save_profile"):
+        if new.profile not in new.user:
+            raise ValueError(f"{profile_label(new, new.profile)} is built in: save it as a new profile")
+        new = replace(new, user={**new.user, new.profile: _saved(new.user[new.profile].label, new.settings)})
+    if act.get("save_profile_as") is not None:
+        name = act["save_profile_as"]
+        slug = preset_slug(name)
+        if slug in new.user:
+            raise ValueError(f"a profile named {name!r} exists already: select it and Save")
+        new = replace(new, user={**new.user, slug: _saved(name, new.settings)}, profile=slug)
+
+    gone = act.get("delete_profile")
+    if gone is not None:
+        if gone in builtin_profiles():
+            raise ValueError(f"{profile_label(new, gone)} is built in and cannot be deleted")
+        if gone not in new.user:
+            raise ValueError(f"no profile {gone!r} of yours")
+        new = replace(new, user={k: v for k, v in new.user.items() if k != gone})
+        if new.default_profile == gone:
+            new = replace(new, default_profile=FALLBACK_PROFILE)
+        if new.profile == gone:
+            new = load_profile(new, new.default_profile)
+
+    default = act.get("default_profile")
+    if default is not None and default != new.default_profile:
+        if default not in profile_names(new):
+            raise ValueError(f"unknown profile {default!r}")
+        new = replace(new, default_profile=default)
+
+    if "enabled" in act:
+        new = replace(new, enabled=act["enabled"])
+    return new
+
+
+def saved_state(helm: Helm) -> dict:
+    """What is written to the settings file: the wheel's setup, the default profile and the
+    operator's own profiles. Never ``enabled`` (force feedback always starts off) and never
+    unsaved changes."""
+    current = config_of(helm.settings)
+    return {
+        "version": 2,
+        "setup": {k: current[k] for k in SETUP_KEYS},
+        "default_profile": helm.default_profile,
+        "profiles": {n: {"label": p.label, "description": p.description, "settings": p.settings} for n, p in helm.user.items()},
+    }
+
+
+#: The name a version-1 file's tuned settings come back under, when no profile has them.
+RESTORED = "restored-settings"
+RESTORED_LABEL = "Restored settings"
+
+
+def load_state(doc, helm: Helm, *, gain_cap_pct: float) -> tuple[Helm, list[str]]:
+    """``helm`` with a settings file's setup, default and profiles, and what was dropped.
+
+    ``enabled`` is never restored. A saved gain above today's cap comes back as the cap. A
+    profile that no longer passes the checks is dropped, and said why. A version-1 file
+    (``settings`` and ``presets``) is read too: its presets become profiles, and its tuned
+    settings, if no profile has them, become the profile "Restored settings", the default.
+    The selected profile is not loaded here; the caller loads the one to start in.
     """
     notes: list[str] = []
     if not isinstance(doc, dict):
-        return settings, {}, ["the settings file is not a JSON object: ignored"]
+        return helm, ["the settings file is not a JSON object: ignored"]
+    v1 = doc.get("version") != 2
+    defaults = behaviour_of(FfbSettings())
     user: dict = {}
-    for name, p in (doc.get("presets") or {}).items():
+    for name, p in (doc.get("presets" if v1 else "profiles") or {}).items():
         try:
             preset_slug(name)
             kept = {k: v for k, v in dict(p["settings"]).items() if k in BEHAVIOUR_KEYS}
-            apply_config(FfbSettings(), {k: v for k, v in kept.items() if k != "wheel_lock_deg"},
+            values = _feel({**defaults, **kept})
+            apply_config(FfbSettings(), {k: v for k, v in values.items() if k != "wheel_lock_deg"},
                          gain_cap_pct=MAX_GAIN_CEILING_PCT, read_only={})
-            user[name] = Preset(str(p["label"])[:40], str(p.get("description", "")), kept)
+            user[name] = Preset(str(p["label"])[:40], describe_behaviour(values), values)
         except (ValueError, KeyError, TypeError) as e:
-            notes.append(f"saved behaviour {name!r} dropped: {e}")
-    saved = {k: v for k, v in dict(doc.get("settings") or {}).items() if k != "mode"}
-    gain = saved.get("max_gain_pct")
+            notes.append(f"saved profile {name!r} dropped: {e}")
+    helm = replace(helm, user=user)
+
+    saved = dict(doc.get("settings" if v1 else "setup") or {})
+    setup = {k: v for k, v in saved.items() if k in SETUP_KEYS}
+    gain = setup.get("max_gain_pct")
     cap = min(gain_cap_pct, MAX_GAIN_CEILING_PCT)
     if isinstance(gain, (int, float)) and not isinstance(gain, bool) and gain > cap:
-        saved["max_gain_pct"] = cap
+        setup["max_gain_pct"] = cap
         notes.append(f"saved gain {gain:g} % is above today's cap: {cap:g} %")
     try:
-        settings = apply_config(settings, saved, gain_cap_pct=gain_cap_pct, read_only={}, user_presets=user)
+        helm = replace(helm, settings=apply_config(helm.settings, setup, gain_cap_pct=gain_cap_pct, read_only={}))
     except ValueError as e:
-        notes.append(f"saved settings ignored: {e}")
-    return settings, user, notes
+        notes.append(f"saved setup ignored: {e}")
+
+    if v1:
+        tuned = {k: v for k, v in saved.items() if k in BEHAVIOUR_KEYS and k != "mode"}  # v1 kept no mode
+        if tuned:
+            try:
+                restored = apply_config(helm.settings, {**profile_settings(helm, COMMAND_LINE), **tuned},
+                                        gain_cap_pct=MAX_GAIN_CEILING_PCT, read_only={})
+                values = behaviour_of(restored)
+                if not any(profile_settings(helm, n) == values for n in profile_names(helm)):
+                    helm = replace(helm, user={**helm.user, RESTORED: Preset(RESTORED_LABEL, describe_behaviour(values), values)})
+                    helm = replace(helm, default_profile=RESTORED)
+                    notes.append(f"the settings tuned before profiles are kept as {RESTORED_LABEL!r}, the default")
+            except ValueError as e:
+                notes.append(f"saved settings ignored: {e}")
+    else:
+        default = doc.get("default_profile")
+        if default in profile_names(helm):
+            helm = replace(helm, default_profile=default)
+        elif default is not None:
+            notes.append(f"default profile {default!r} is gone: starting in {profile_label(helm, helm.default_profile)}")
+    return helm, notes
 
 
 # --- Detents (``detent`` mode) ----------------------------------------------------------
