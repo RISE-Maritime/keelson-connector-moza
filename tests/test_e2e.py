@@ -467,6 +467,12 @@ def test_an_alarm_colours_the_rim_until_acknowledged(h, monkeypatch):
     wait(lambda: alarm(True) or colour() == 0x56F7FC, what="the rim's own colour back")
     alarm(False)
     wait(lambda: colour() == 0xFF8800, what="raised again")
+    alarm(True)
+    wait(lambda: colour() == 0x56F7FC, what="acknowledged again")
+    # Try: an emergency as it would come, nothing on the bus. Force feedback is off here:
+    # the colour only, said in the log, not refused.
+    assert rpc(h, "set_config", json.dumps({"test": "alarm-emergency"}).encode())[0]
+    wait(lambda: colour() == 0xFF0000, what="the emergency's colour on Try")
     h.proc.send_signal(signal.SIGTERM)
     assert h.proc.wait(timeout=10) == 0
     assert colour() == 0x56F7FC  # put back on exit

@@ -26,8 +26,8 @@ from .model import FfbSettings
 log = logging.getLogger(__name__)
 
 NAMES = (*proto.RIM_COLORS, *proto.RIM_BRIGHTNESS)
-#: How long the panel's Show displays a level's colour.
-PREVIEW_S = 3.0
+#: How long the panel's Try shows a level's colour: as long as an emergency's three rumbles.
+PREVIEW_S = 5.0
 _LEVEL_NAMES = {p: level for level, p in model.ALARM_PRIORITIES.items()}
 
 
@@ -67,10 +67,10 @@ class RimLeds:
             self._persist(None)
             self.status = "ready"
 
-    def preview(self, level: str, now: float) -> None:
-        """Show a level's colour for ``PREVIEW_S`` (the panel's Show), alarms or not."""
+    def preview(self, level: str, now: float, seconds: float = PREVIEW_S) -> None:
+        """Show a level's colour for a while (the panel's Try), alarms or not."""
         with self._lock:
-            self._preview = (model.ALARM_PRIORITIES[level], now + PREVIEW_S)
+            self._preview = (model.ALARM_PRIORITIES[level], now + seconds)
 
     def sync(self, settings: FfbSettings, top: int | None, now: float) -> None:
         """Show what ``model.rim_led_state`` says. Never raises."""

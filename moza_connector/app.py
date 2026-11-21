@@ -540,12 +540,21 @@ def _run_with_device(
                     if patch:
                         raise ValueError("'test' goes alone, not with settings")
                     test = str(test)
-                    if test.startswith("rim-"):
-                        if rim is None:
-                            raise ValueError("no rim LEDs (moza2keelson --base-serial)")
-                        if test[4:] not in model.ALARM_LEVELS:
-                            raise ValueError(f"no alarm level {test[4:]!r}")
-                        rim.preview(test[4:], time.monotonic())
+                    if test.startswith("alarm-"):
+                        # An alarm as it would come, without one on the bus: the rim in its
+                        # colour, and its rumble while force feedback is on.
+                        level = test[len("alarm-"):]
+                        if level not in model.ALARM_LEVELS:
+                            raise ValueError(f"no alarm level {level!r}")
+                        now = time.monotonic()
+                        if rim is not None:
+                            rim.preview(level, now)
+                        try:
+                            ffb.test_pulse(level, now)
+                        except ValueError as e:
+                            if rim is None:
+                                raise ValueError(f"nothing to show or feel: {e}") from None
+                            log.info("Try %s alarm: colour only (%s)", level, e)
                         return
                     ffb.test_pulse(test, time.monotonic())
                     return

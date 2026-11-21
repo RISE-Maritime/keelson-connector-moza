@@ -109,7 +109,7 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `delete_profile` | action | one of your profiles; the selected or default one falls back to `ship` |
 | `hard_stop` | yes (with `--base-serial`) | `true` / `false`: the base's own steering angle set to the helm's lock |
 | `base_serial`, `base_angle_deg`, `base_max_deg` | no | the hard stop's state (`off`, `base at 900°`, `hard stop at ±90°`, `waiting: …`, `error: …`); the base's angle now and its own |
-| `test` | action | `center`, `detent`, `hardover`, `caution`, `warning` or `emergency`: plays that haptic (a level's rumble pattern; an emergency's three) at its own strength, only while force feedback is on; `rim-caution`, `rim-warning`, `rim-emergency`: shows that colour on the rim for 3 s. Sent alone, changes and saves nothing |
+| `test` | action | `center`, `detent`, `hardover`, `caution`, `warning` or `emergency`: plays that haptic (a level's rumble pattern; an emergency's three) at its own strength, only while force feedback is on; `alarm-caution`, `alarm-warning`, `alarm-emergency`: that alarm as it would come, nothing put on the bus: the rim in its colour for 5 s, and its rumble while force feedback is on. Sent alone, changes and saves nothing |
 | `max_gain_pct` | yes | 0 … `gain_cap_pct` |
 | `spring_pct`, `damper_pct` | yes | 0 … 100 |
 | `rudder_max_deg` | yes | 1 … 90 |

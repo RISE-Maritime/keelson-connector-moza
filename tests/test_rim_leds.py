@@ -90,5 +90,5 @@ def test_show_previews_a_colour_then_goes_back():
     rim.preview("caution", 10.0)
     rim.sync(FfbSettings(alarm_leds=False), None, 10.1)  # shown even with the alarm colours off
     assert colours(base) == {0xFFD400}
-    rim.sync(FfbSettings(alarm_leds=False), None, 13.5)
+    rim.sync(FfbSettings(alarm_leds=False), None, 15.5)
     assert colours(base) == {OWN}
