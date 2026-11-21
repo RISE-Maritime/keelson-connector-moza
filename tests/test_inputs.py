@@ -123,5 +123,20 @@ def test_moving_the_lock_republishes_the_wheel_at_once():
     pub.handle(codes.EV_ABS, codes.ABS["ABS_X"], round(32767.5 + 0.25 * 32767.5), 1.0)
     assert sink.of(*wheel)[-1] == pytest.approx(25.0, abs=0.1)
     n = len(sink.of(*wheel))
-    pub.set_lock_fraction(0.5, 1.001)  # inside the rate cap: still sent
+    pub.set_steering(0.5, 0.0, 1.001)  # inside the rate cap: still sent
     assert len(sink.of(*wheel)) == n + 1 and sink.of(*wheel)[-1] == pytest.approx(50.0, abs=0.1)
+
+
+def test_helm_deadband_publishes_a_true_zero_near_centre():
+    sink = Sink()
+    # 450 deg to full lock, a 45 deg deadband: 10 % of the lock.
+    pub = InputPublisher(sink, profile.load("r21-ultra"), AXES, KEYS, "moza_r21", RateSettings(), deadband_pct=10.0)
+    wheel = ("wheel_position_pct", "moza_r21/wheel")
+    pub.prime(0.0)
+    pub.handle(codes.EV_ABS, codes.ABS["ABS_X"], round(32767.5 + 0.08 * 32767.5), 1.0)  # 8 % off centre
+    assert sink.of(*wheel)[-1] == 0.0
+    pub.handle(codes.EV_ABS, codes.ABS["ABS_X"], round(32767.5 + 0.20 * 32767.5), 2.0)  # past the band
+    assert sink.of(*wheel)[-1] == pytest.approx((20 - 10) / 90 * 100, abs=0.1)
+    n = len(sink.of(*wheel))
+    pub.set_steering(1.0, 0.0, 2.001)  # no band: the same wheel publishes its own 20 % at once
+    assert len(sink.of(*wheel)) == n + 1 and sink.of(*wheel)[-1] == pytest.approx(20.0, abs=0.1)

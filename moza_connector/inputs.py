@@ -68,9 +68,11 @@ class InputPublisher:
         rate: RateSettings,
         wall_ns: Callable[[], int] = time.time_ns,
         lock_fraction: float = 1.0,
+        deadband_pct: float = 0.0,
     ):
         self._put = put
         self._lock_fraction = lock_fraction
+        self._deadband_pct = deadband_pct
         self._rate = rate
         self._wall_ns = wall_ns
         self._lock = threading.Lock()
@@ -112,16 +114,17 @@ class InputPublisher:
         axis.raw = raw
         v = model.normalize(raw, r.lo, r.hi, bipolar=m.bipolar, invert=m.invert)
         if m.steering:
-            v = model.steering_pct(v, self._lock_fraction)
+            v = model.helm_deadband(model.steering_pct(v, self._lock_fraction), self._deadband_pct)
         return model.snap(v, self._rate.center_snap_pct)
 
-    def set_lock_fraction(self, fraction: float, now: float) -> None:
-        """Full helm lock moved (``FfbSettings.lock_fraction``): re-scale the wheel and
-        publish it at once, so the bus never carries the old scale for a backstop period."""
+    def set_steering(self, fraction: float, deadband_pct: float, now: float) -> None:
+        """Full helm lock or the helm deadband moved (``FfbSettings.lock_fraction`` /
+        ``deadband_pct``): re-scale the wheel and publish it at once, so the bus never carries
+        the old scale for a backstop period."""
         with self._lock:
-            if fraction == self._lock_fraction:
+            if (fraction, deadband_pct) == (self._lock_fraction, self._deadband_pct):
                 return
-            self._lock_fraction = fraction
+            self._lock_fraction, self._deadband_pct = fraction, deadband_pct
             for axis in self._axes.values():
                 if axis.map.steering and axis.raw is not None:
                     axis.value = self._scaled(axis, axis.raw)

@@ -31,7 +31,7 @@ class FfbController:
         self._op = threading.RLock()  # every operation on the base
         self._rudder_deg: float | None = None
         self._rudder_at: float | None = None
-        self._spring_id: int | None = None
+        self._spring_ids: list[int] = []  # one per layer (spring_boost)
         self._spring_coeff: int | None = None
         self._damper_id: int | None = None
         self._endstop_id: int | None = None
@@ -230,25 +230,42 @@ class FfbController:
             rudder_deg, rudder_at = self._rudder_deg, self._rudder_at
         target = model.spring_target(self._s, now=now, rudder_deg=rudder_deg, rudder_received_at=rudder_at)
         coeff = model.coeff_level(self._s.spring_pct)
-        if not model.needs_update(self._spring, target) and (not target.enabled or coeff == self._spring_coeff):
+        layers = model.spring_layers(self._s)
+        same_shape = coeff == self._spring_coeff and layers == len(self._spring_ids)
+        if not model.needs_update(self._spring, target) and (not target.enabled or same_shape):
             return self._spring
         if self._spring is None or self._spring.source != target.source:
             log.info("Spring: %s", target.source)
         if target.enabled:
-            new = self._spring_id is None
-            self._spring_id = self._dev.upload_condition(
-                codes.FF_SPRING,
-                -1 if new else self._spring_id,
-                center=target.center,
-                coeff=coeff,
-                saturation=model.saturation_level(100),
-            )
+            # Fewer layers: stop and free the extra ones first.
+            while len(self._spring_ids) > layers:
+                extra = self._spring_ids.pop()
+                self._dev.play(extra, False)
+                self._dev.erase(extra)
+            # Every layer the same spring, each with its share of the saturation: the pull
+            # near centre is `layers` times steeper, the pull far from it unchanged.
+            saturation = model.saturation_level(100.0 / layers)
+            for i in range(layers):
+                existing = self._spring_ids[i] if i < len(self._spring_ids) else None
+                effect_id = self._dev.upload_condition(
+                    codes.FF_SPRING,
+                    -1 if existing is None else existing,
+                    center=target.center,
+                    coeff=coeff,
+                    saturation=saturation,
+                )
+                if existing is None:
+                    self._spring_ids.append(effect_id)
+                    if self._spring_playing:
+                        self._dev.play(effect_id, True)
             self._spring_coeff = coeff
             if not self._spring_playing:
-                self._dev.play(self._spring_id, True)
+                for effect_id in self._spring_ids:
+                    self._dev.play(effect_id, True)
                 self._spring_playing = True
-        elif self._spring_id is not None and self._spring_playing:
-            self._dev.play(self._spring_id, False)
+        elif self._spring_ids and self._spring_playing:
+            for effect_id in self._spring_ids:
+                self._dev.play(effect_id, False)
             self._spring_playing = False
         self._spring = target
         return target
@@ -308,7 +325,7 @@ class FfbController:
     def _release(self) -> None:
         """Every effect stopped and erased, the gain at 0. Never raises."""
         self._started_at = None
-        for effect_id in (self._spring_id, self._damper_id, self._endstop_id, self._click_id, self._center_id):
+        for effect_id in (*self._spring_ids, self._damper_id, self._endstop_id, self._click_id, self._center_id):
             if effect_id is None:
                 continue
             for step in (lambda: self._dev.play(effect_id, False), lambda: self._dev.erase(effect_id)):
@@ -316,7 +333,8 @@ class FfbController:
                     step()
                 except Exception as e:  # the base may already be gone
                     log.debug("FF cleanup of effect %s: %s", effect_id, e)
-        self._spring_id = self._damper_id = self._endstop_id = self._click_id = self._center_id = None
+        self._spring_ids = []
+        self._damper_id = self._endstop_id = self._click_id = self._center_id = None
         self._center_level = None
         self._spring_playing = False
         self._click_level = None

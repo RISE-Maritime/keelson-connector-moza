@@ -6,6 +6,7 @@ so it is tested without a wheel, a bus or a sleep.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from enum import Enum
 
@@ -102,6 +103,17 @@ class FfbSettings:
     detent_pct: float = 60.0
     #: The centre mark: a distinct pulse each time the wheel reaches centre, 0 for none.
     center_mark_pct: float = 80.0
+    #: Wheel degrees either side of centre that order exactly 0: a spring never brings the
+    #: wheel exactly to centre against the base's friction, and a ship needs a true 0.
+    center_deadband_deg: float = 0.0
+    #: How many times steeper the centring spring is near centre (1..3): that many springs,
+    #: each with that share of the saturation, so the far pull is unchanged.
+    spring_boost: float = 1.0
+
+    @property
+    def deadband_pct(self) -> float:
+        """The helm deadband as a percentage of full helm lock."""
+        return self.center_deadband_deg / self.wheel_lock_deg * 100.0
 
     @property
     def lock_fraction(self) -> float:
@@ -133,6 +145,21 @@ def steering_pct(axis_pct: float, fraction: float) -> float:
 #: the centre, on the same scale where the full deadband (0xFFFF) is the axis' half travel.
 #: hid-pidff and the PID spec read it so; the live check is that the end stop bites where
 #: ``wheel_position_pct`` reaches +-100.
+def spring_layers(settings: FfbSettings) -> int:
+    """How many centring springs to stack for ``spring_boost`` (1..3)."""
+    return int(clamp(round(settings.spring_boost), 1, 3))
+
+
+def helm_deadband(pct: float, band_pct: float) -> float:
+    """The wheel position as ordered: exactly 0 within ``band_pct`` of centre, and rescaled
+    outside it so the order grows from 0 at the band's edge to +-100 at full lock, no jump."""
+    if band_pct <= 0:
+        return pct
+    if abs(pct) <= band_pct:
+        return 0.0
+    return math.copysign((abs(pct) - band_pct) / (100.0 - band_pct) * 100.0, pct)
+
+
 def endstop_deadband(settings: FfbSettings) -> int:
     """The end stop's dead band (u16): no force inside full helm lock."""
     return round(settings.lock_fraction * U16_MAX)
@@ -187,6 +214,8 @@ CONFIG_BOUNDS = {
     "detent_deg": (0.5, 30.0),
     "detent_pct": (0.0, 100.0),
     "center_mark_pct": (0.0, 100.0),
+    "center_deadband_deg": (0.0, 30.0),  # and under half the wheel lock
+    "spring_boost": (1.0, 3.0),
 }
 CONFIG_WRITABLE = ("mode", "max_gain_pct", *CONFIG_BOUNDS, "rudder_invert")
 
@@ -207,6 +236,8 @@ def config_of(settings: FfbSettings) -> dict:
         "detent_deg": settings.detent_deg,
         "detent_pct": settings.detent_pct,
         "center_mark_pct": settings.center_mark_pct,
+        "center_deadband_deg": settings.center_deadband_deg,
+        "spring_boost": settings.spring_boost,
     }
 
 
@@ -248,6 +279,11 @@ def apply_config(settings: FfbSettings, patch: dict, *, gain_cap_pct: float, rea
                 raise ValueError(f"{key} {value:g} outside {lo:g}..{hi:g}{what}")
             changes[key] = float(value)
     new = replace(settings, **changes)
+    if new.center_deadband_deg >= new.wheel_lock_deg / 2.0:
+        raise ValueError(
+            f"center_deadband_deg {new.center_deadband_deg:g} must be under half of wheel_lock_deg "
+            f"{new.wheel_lock_deg:g}"
+        )
     if new.wheel_lock_deg > new.base_range_deg / 2.0:
         raise ValueError(
             f"wheel_lock_deg {new.wheel_lock_deg:g} is past the base's own end "
@@ -279,8 +315,13 @@ def rudder_to_wheel_fraction(rudder_deg: float, settings: FfbSettings) -> float:
 
 
 def center_level(wheel_fraction: float, settings: FfbSettings) -> int:
-    """The spring ``center`` (s16, device coordinates) for a fraction of full helm lock."""
-    frac = clamp(wheel_fraction, -1.0, 1.0) * settings.lock_fraction
+    """The spring ``center`` (s16, device coordinates) for a fraction of full helm ORDER:
+    the wheel position that orders it, through the helm deadband and the lock."""
+    frac = clamp(wheel_fraction, -1.0, 1.0)
+    band = settings.deadband_pct / 100.0
+    if frac != 0.0:
+        frac = math.copysign(band + abs(frac) * (1.0 - band), frac)
+    frac *= settings.lock_fraction
     if settings.wheel_invert:
         frac = -frac
     return round(frac * S16_MAX)

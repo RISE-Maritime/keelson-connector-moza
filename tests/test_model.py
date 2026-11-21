@@ -293,3 +293,35 @@ def test_center_mark_on_arriving_or_passing_never_on_leaving():
     s = FfbSettings(wheel_lock_deg=90)
     assert model.wheel_deg(50.0, s) == 45.0
     assert model.CENTER_MARK_MS == 2 * model.CLICK_DURATION_MS < 1000
+
+
+# --- Zero at centre: the helm deadband ----------------------------------------------------
+
+
+def test_helm_deadband_is_zero_inside_continuous_and_full_at_lock():
+    assert model.helm_deadband(1.5, 2.0) == 0.0
+    assert model.helm_deadband(-2.0, 2.0) == 0.0
+    assert model.helm_deadband(2.0001, 2.0) == pytest.approx(0.0, abs=1e-3)  # no jump at the edge
+    assert model.helm_deadband(100.0, 2.0) == 100.0
+    assert model.helm_deadband(-51.0, 2.0) == pytest.approx(-50.0)
+    assert model.helm_deadband(37.0, 0.0) == 37.0  # no band: unchanged
+
+
+def test_follow_up_centre_inverts_the_deadband():
+    s = FfbSettings(wheel_lock_deg=450, center_deadband_deg=45)  # a 10 % band
+    assert s.deadband_pct == pytest.approx(10.0)
+    assert model.center_level(0.0, s) == 0
+    assert model.center_level(1.0, s) == model.S16_MAX  # full rudder: full lock
+    half = model.center_level(0.5, s) / model.S16_MAX * 100  # the wheel that orders half rudder
+    assert model.helm_deadband(half, s.deadband_pct) == pytest.approx(50.0, abs=0.01)
+    assert model.center_level(-0.5, s) == -model.center_level(0.5, s)
+
+
+def test_apply_config_deadband_and_boost():
+    s = FfbSettings(wheel_lock_deg=90)
+    new = model.apply_config(s, {"center_deadband_deg": 10, "spring_boost": 3}, gain_cap_pct=30, read_only={})
+    assert (new.center_deadband_deg, model.spring_layers(new)) == (10.0, 3)
+    with pytest.raises(ValueError, match="under half"):
+        model.apply_config(replace(s, wheel_lock_deg=40), {"center_deadband_deg": 20}, gain_cap_pct=30, read_only={})
+    with pytest.raises(ValueError, match="outside"):
+        model.apply_config(s, {"spring_boost": 4}, gain_cap_pct=30, read_only={})

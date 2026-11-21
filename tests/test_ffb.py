@@ -325,3 +325,41 @@ def test_center_mark_wins_over_a_detent_click():
     assert c.on_wheel(0.0, 0.1)  # centre and the 0 deg notch at once: one pulse, the centre's
     assert dev.ff_log.count(("play", clicks[model.CENTER_MARK_MS], True)) == 1
     assert dev.ff_log.count(("play", clicks[model.CLICK_DURATION_MS], True)) == 0
+
+
+def spring_layers(dev):
+    """The centring springs uploaded (no dead band: the end stop has one)."""
+    return {e[2]: e for e in uploads(dev, codes.FF_SPRING) if e[6] == 0}
+
+
+def test_spring_boost_stacks_springs_with_shared_saturation():
+    dev = fake()
+    s = FfbSettings(mode=FfbMode.CENTER, spring_boost=3)
+    c = FfbController(dev, s)
+    c.start(0.0)
+    layers = spring_layers(dev)
+    assert len(layers) == 3
+    for e in layers.values():
+        assert e[4] == model.coeff_level(s.spring_pct)  # each as steep as one spring
+        assert e[5] == model.saturation_level(100 / 3)  # far pull no stronger than one spring
+        assert ("play", e[2], True) in dev.ff_log
+    c.shutdown()
+    assert set(layers) <= {e[1] for e in dev.ff_log if e[0] == "erase"}
+
+
+def test_spring_boost_changes_while_running_and_follow_up_moves_every_layer():
+    dev = fake()
+    s = FfbSettings(mode=FfbMode.FOLLOW_UP, spring_boost=1)
+    c = FfbController(dev, s)
+    c.start(0.0)
+    (first,) = spring_layers(dev)
+    c.update(replace(s, spring_boost=3), 1.0)
+    ids = set(spring_layers(dev))
+    assert len(ids) == 3 and first in ids
+    c.on_rudder(17.5, 1.9)
+    c.tick(2.0)
+    centres = {i: [e for e in uploads(dev, codes.FF_SPRING) if e[2] == i][-1][3] for i in ids}
+    assert set(centres.values()) == {model.center_level(0.5, s)}
+    c.update(replace(s, spring_boost=1), 3.0)
+    erased = {e[1] for e in dev.ff_log if e[0] == "erase"}
+    assert len(ids - erased) == 1 and first not in erased

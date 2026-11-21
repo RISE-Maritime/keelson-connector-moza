@@ -75,6 +75,12 @@ def parser() -> argparse.ArgumentParser:
         help="The base's steering angle, lock to lock, as set in Pit House or Boxflat (the USB reports do not say)",
     )
     g.add_argument(
+        "--center-deadband-deg",
+        type=float,
+        default=0.0,
+        help="Wheel degrees either side of centre that order exactly 0 (a helm deadband, rescaled outside it)",
+    )
+    g.add_argument(
         "--wheel-lock-deg",
         type=float,
         help="Wheel rotation from centre to full helm lock (+-100 %%); past it force feedback adds an end stop. "
@@ -111,6 +117,12 @@ def parser() -> argparse.ArgumentParser:
     )
     f.add_argument("--ffb-detent-deg", type=float, default=5.0, help="detent mode: a click each this much rudder order")
     f.add_argument("--ffb-detent-pct", type=float, default=60.0, help="detent mode: click strength, under the gain")
+    f.add_argument(
+        "--ffb-spring-boost",
+        type=float,
+        default=1.0,
+        help="Centring spring this many times steeper near centre (1..3); the pull far from centre is unchanged",
+    )
     f.add_argument(
         "--ffb-center-mark-pct",
         type=float,
@@ -157,6 +169,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("--ffb-detent-pct must be 0..100")
     if not 0 <= args.ffb_center_mark_pct <= 100:
         p.error("--ffb-center-mark-pct must be 0..100")
+    if not 1 <= args.ffb_spring_boost <= 3:
+        p.error("--ffb-spring-boost must be 1..3")
+    if not 0 <= args.center_deadband_deg <= model.CONFIG_BOUNDS["center_deadband_deg"][1] or (
+        args.center_deadband_deg >= args.wheel_lock_deg / 2.0
+    ):
+        p.error("--center-deadband-deg must be 0..30 and under half of --wheel-lock-deg")
     return args
 
 
@@ -236,6 +254,8 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
             detent_deg=args.ffb_detent_deg,
             detent_pct=args.ffb_detent_pct,
             center_mark_pct=args.ffb_center_mark_pct,
+            center_deadband_deg=args.center_deadband_deg,
+            spring_boost=args.ffb_spring_boost,
         )
         if args.ffb_preset:
             settings = model.apply_config(
@@ -252,6 +272,7 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
             args.source_id,
             RateSettings(args.axis_max_hz, args.axis_min_hz, args.axis_deadband_pct, args.axis_center_snap_pct),
             lock_fraction=settings.lock_fraction,
+            deadband_pct=settings.deadband_pct,
         )
         log.info("Full helm lock at %.0f deg of the base's %.0f lock to lock", args.wheel_lock_deg, args.base_range_deg)
         ffb = FfbController(dev, settings)
@@ -316,7 +337,7 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                     raise ValueError(f"{dev.name} has no force feedback")
                 log.info("set_config %s", patch)
                 ffb.update(new, time.monotonic())
-                inputs.set_lock_fraction(new.lock_fraction, time.monotonic())
+                inputs.set_steering(new.lock_fraction, new.deadband_pct, time.monotonic())
 
             make_configurable(session, args.realm, args.entity_id, args.source_id, get_config, set_config)
             subjects.append("configuration_json")
