@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import NamedTuple
 
 from . import codes, model
 from .device import MozaDevice
@@ -31,8 +32,17 @@ PULSES = {
     "detent": (model.CLICK_DURATION_MS, model.CLICK_PERIOD_MS),
     "center": (model.CENTER_MARK_MS, model.CLICK_PERIOD_MS),
     "hardover": (model.HARDOVER_MS, model.CLICK_PERIOD_MS),
-    "rumble": (model.RUMBLE_MS, model.RUMBLE_PERIOD_MS),
+    "rumble": (model.SEGMENT_MAX_MS, model.RUMBLE_PERIOD_MS),  # re-uploaded per play, at its length
 }
+
+
+class _Rumble(NamedTuple):
+    kind: str
+    schedule: list  # [(start ms, duration ms)]
+    started: float
+    index: int  # the next play
+    period: float | None  # seconds to the next round while the alarm lasts, None for once
+    once: bool  # a Try
 
 
 class FfbController:
@@ -56,8 +66,8 @@ class FfbController:
         self._notch: int | None = None  # the detent the wheel's rudder order sits in
         self._center_side: int | None = None  # -1 port of centre, 0 at it, +1 starboard
         self._hardover_side: int | None = None  # +-1 in a hard-over warning zone, else 0
-        # The rumble playing: (level, started at, rumbles played, limit for a Try or None).
-        self._rumble: tuple[str, float, int, int | None] | None = None
+        # The rumble playing (an alarm's pattern), or None.
+        self._rumble: _Rumble | None = None
         self._alarms: dict = {}  # identifier -> model.AlarmSeen
         self._wheel_pct: float | None = None
         self._spring: SpringTarget | None = None
@@ -99,35 +109,59 @@ class FfbController:
             self._sog_kn, self._sog_at = sog_kn, received_at
 
     def on_alarm(self, identifier: str, priority: int, acknowledged: bool, now: float,
-                 expires_at: float | None = None) -> bool:
-        """An alarm. A new (or newly higher) unacknowledged one rumbles at its level's strength
-        and pattern, unless a higher level is rumbling; acknowledged, it is over (and may
-        rumble again if raised again). Returns whether a rumble starts."""
+                 expires_at: float | None = None, category: int = 0) -> bool:
+        """An alarm. A new (or newly higher) unacknowledged one plays its kind's pattern at its
+        kind's strength (fire for keelson's fire category, whatever the level), unless a
+        higher kind is playing; acknowledged, it is over (and may play again if raised again).
+        Returns whether a rumble starts."""
         with self._op:
-            self._alarms, fresh = model.alarm_seen(self._alarms, identifier, priority, acknowledged, now, expires_at)
-            level = model.alarm_level(priority)
-            if not fresh or level is None or model.alarm_pct(self._s, level) <= 0 or self._started_at is None:
+            rank = model.alarm_rank(priority, category)
+            self._alarms, fresh = model.alarm_seen(self._alarms, identifier, rank, acknowledged, now, expires_at)
+            kind = model.alarm_kind(rank) if priority >= model.ALARM_PRIORITIES["caution"] else None
+            if not fresh or kind is None or model.alarm_pct(self._s, kind) <= 0 or self._started_at is None:
                 return False
-            if self._rumble is not None and model.ALARM_PRIORITIES[self._rumble[0]] > priority:
+            if self._rumble is not None and model.ALARM_RANKS[self._rumble.kind] > rank:
                 return False
-            if not self._start_rumble(level, now):
+            if not self._start_rumble(kind, now):
                 return False
-            log.info("Alarm %s (%s): rumble", identifier, level)
+            log.info("Alarm %s (%s): rumble", identifier, kind)
             return True
 
     def top_alarm(self, now: float) -> int | None:
-        """The highest priority of an active alarm (for the rim's colour), or None."""
+        """The highest rank of an active alarm (for the lights' colour), or None."""
         with self._op:
             return model.alarm_top(self._alarms, now)
 
-    def _start_rumble(self, level: str, now: float, limit: int | None = None) -> bool:
-        """Start a level's rumble pattern, the rumble effect re-uploaded at its strength."""
-        self._sync_pulse("rumble", True, model.coeff_level(model.alarm_pct(self._s, level)))
+    def _start_rumble(self, kind: str, now: float, once: bool = False) -> bool:
+        """Start a kind's pattern; ``once`` (a Try) plays it once, whatever it would repeat."""
+        if model.alarm_pct(self._s, kind) <= 0:
+            return False
+        self._sync_pulse("rumble", True, model.coeff_level(model.alarm_pct(self._s, kind)))
         if "rumble" not in self._pulses:
             return False
-        self._rumble = (level, now, 0, limit)
+        schedule, continuous = model.alarm_schedule(self._s, kind)
+        period = None if once else model.pattern_period_s(self._s, kind, schedule, continuous)
+        self._rumble = _Rumble(kind, schedule, now, 0, period, once)
         self._tick(now)
         return True
+
+    def _play_segment(self, kind: str, duration_ms: int) -> None:
+        """One play of the rumble: re-uploaded at this length (at most a lease, never renewed)
+        and this kind's strength."""
+        current = self._pulses.get("rumble")
+        if current is None:
+            return
+        level = model.coeff_level(model.alarm_pct(self._s, kind))
+        try:
+            effect_id = self._dev.upload_click(
+                current[0], magnitude=level, period_ms=model.RUMBLE_PERIOD_MS,
+                duration_ms=min(int(duration_ms), model.SEGMENT_MAX_MS),
+            )
+        except (NotImplementedError, RuntimeError) as e:
+            log.warning("No rumble: %s", e)
+            return
+        self._pulses["rumble"] = (effect_id, level)
+        self._dev.play(effect_id, True)
 
     # --- Switching on -------------------------------------------------------------------
 
@@ -244,10 +278,10 @@ class FfbController:
         self._sync_pulse("detent", s.mode is FfbMode.DETENT, model.click_level(s))
         self._sync_pulse("center", True, model.center_mark_level(s))
         self._sync_pulse("hardover", s.hardover_warn_deg > 0, model.coeff_level(s.hardover_pct))
-        if self._rumble is not None and model.alarm_pct(s, self._rumble[0]) <= 0:
+        if self._rumble is not None and model.alarm_pct(s, self._rumble.kind) <= 0:
             self._rumble = None
-        pcts = [model.alarm_pct(s, level) for level in model.ALARM_LEVELS]
-        playing = model.alarm_pct(s, self._rumble[0]) if self._rumble is not None else max(pcts)
+        pcts = [model.alarm_pct(s, kind) for kind in model.ALARM_KINDS]
+        playing = model.alarm_pct(s, self._rumble.kind) if self._rumble is not None else max(pcts)
         self._sync_pulse("rumble", max(pcts) > 0, model.coeff_level(playing))
         if "rumble" not in self._pulses:
             self._rumble = None
@@ -278,13 +312,13 @@ class FfbController:
                 raise ValueError("force feedback is shutting down")
             if self._started_at is None:
                 raise ValueError("force feedback is off: choose a mode first")
-            if name not in model.ALARM_LEVELS and name not in self._pulses:
+            if name not in model.ALARM_KINDS and name not in self._pulses:
                 self._sync_pulse(name, True, level)
                 if name not in self._pulses:
                     raise ValueError(f"{self._dev.name} cannot play the {name} pulse")
             log.info("Test: %s", name)
-            if name in model.ALARM_LEVELS:
-                if not self._start_rumble(name, now, limit=model.TEST_RUMBLES):
+            if name in model.ALARM_KINDS:
+                if not self._start_rumble(name, now, once=True):
                     raise ValueError(f"{self._dev.name} cannot play the rumble")
             else:
                 self._pulse(name)
@@ -319,6 +353,29 @@ class FfbController:
 
     # --- The tick (20 Hz) -------------------------------------------------------------------
 
+    def _rumble_tick(self, now: float) -> None:
+        """Play the pattern's plays as they come due; then again while its alarm lasts (a Try
+        once). A repeating alarm stops when it is over: acknowledged, expired, not repeated,
+        or no longer the highest."""
+        r = self._rumble
+        if not r.once and r.period is not None and model.alarm_top(self._alarms, now) != model.ALARM_RANKS[r.kind]:
+            self._rumble = None
+            return
+        elapsed_ms = (now - r.started) * 1000.0
+        due = [i for i in range(r.index, len(r.schedule)) if r.schedule[i][0] <= elapsed_ms]
+        if due:
+            last = due[-1]  # behind (a slow tick): the latest play, not a burst of old ones
+            _start, duration = r.schedule[last]
+            self._play_segment(r.kind, duration)
+            r = self._rumble = r._replace(index=last + 1)
+        if r.index < len(r.schedule):
+            return
+        if r.period is None:
+            if elapsed_ms >= model.pattern_length_ms(r.schedule):
+                self._rumble = None
+        elif now - r.started >= r.period:
+            self._rumble = r._replace(started=now, index=0)
+
     def _set_gain(self, level: int) -> None:
         if level != self._gain:
             self._dev.set_gain(level)
@@ -350,14 +407,7 @@ class FfbController:
         self._sync_damper(lag)
 
         if self._rumble is not None:
-            level, started, played, limit = self._rumble
-            emergency = model.ALARM_PRIORITIES["emergency"]
-            if limit is None and level == "emergency" and model.alarm_top(self._alarms, now) != emergency:
-                self._rumble = None  # the emergency is over: acknowledged, expired or no longer repeated
-            elif model.rumble_due(level, started, played, now, limit):
-                self._pulse("rumble")
-                played += 1
-                self._rumble = None if model.rumble_over(level, played, limit) else (level, started, played, limit)
+            self._rumble_tick(now)
 
         target = model.spring_target(s, now=now, rudder_deg=rudder_deg, rudder_received_at=rudder_at)
         coeff = model.coeff_level(s.spring_pct * self._weight)

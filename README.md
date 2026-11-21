@@ -46,7 +46,7 @@ Wiring `wheel_position_pct/moza_r21/wheel` to a vehicle is the consumer's job; f
 |---|---|---|
 | Hard-over warning | `hardover_warn_deg`, `hardover_pct` | A 45 ms pulse when the rudder order reaches that angle either way, before the end stop. Quiet until the order comes back 2° inside. |
 | Speed-sensitive weight | `speed_full_kn`, `speed_min_pct` | Spring and damper at `speed_min_pct` alongside, rising to full at `speed_full_kn` over the ground (`speed_over_ground_knots` on the vessel's entity). A speed over 2 s old counts as none: full weight, never lighter on old data. |
-| Alarms | `alarm_caution_pct`, `alarm_warning_pct`, `alarm_emergency_pct`, `alarm_leds`, `alarm_<level>_color` | Per keelson `alarm` priority, for each new unacknowledged alarm: caution one 400 ms rumble, warning three a second apart, emergency one every 2 s for as long as it lasts (0: no rumble). With `alarm_leds` (needs `--base-serial` and a rim that answers) the rim's RPM and button LEDs take the highest active level's colour (default yellow, orange, red; an emergency flashes) and get their own colours back when it is over. An alarm is over when acknowledged, past its expiry, or not repeated for 30 s. |
+| Alarms | `alarm_<kind>_pct`, `_pattern`, `_custom`, `_repeat_s`, `_color`; `alarm_short_ms`, `alarm_long_ms`, `alarm_gap_ms`; `alarm_leds`, `alarm_base_light` | Per kind (caution, warning, emergency by keelson priority; fire for keelson's fire-alarm category, whatever its level), a rumble pattern after the ship's signals: one short, two short, three short, one long, the general alarm (seven short, one long), man overboard (three long), fire (continuous), or your own S/L string, with the short and long lengths and the gap settable. Played once per new unacknowledged alarm, or again every `_repeat_s` while it lasts; fire for as long as it lasts. Defaults: caution one short, warning two short, emergency one long every 5 s. Strength 0 is none. With `alarm_leds` / `alarm_base_light` (`--base-serial`) the rim's LEDs and the base's light bar take the highest active kind's colour, steady, and get their own back when it is over (acknowledged, expired, or not repeated for 30 s) and on every exit. |
 | Gear-lag resistance | `lag_resistance_pct` | Extra damping while the actual rudder trails the order, full once it trails by 5°: turn faster than the steering gear and the wheel resists. No fresh rudder, no extra. |
 
 When the base's effect pool is full, a haptic that can't be loaded is logged and left out; the wheel keeps working.
@@ -109,7 +109,7 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `delete_profile` | action | one of your profiles; the selected or default one falls back to `ship` |
 | `hard_stop` | yes (with `--base-serial`) | `true` / `false`: the base's own steering angle set to the helm's lock |
 | `base_serial`, `base_angle_deg`, `base_max_deg` | no | the hard stop's state (`off`, `base at 900°`, `hard stop at ±90°`, `waiting: …`, `error: …`); the base's angle now and its own |
-| `test` | action | `center`, `detent`, `hardover`, `caution`, `warning` or `emergency`: plays that haptic (a level's rumble pattern; an emergency's three) at its own strength, only while force feedback is on; `alarm-caution`, `alarm-warning`, `alarm-emergency`: that alarm as it would come, nothing put on the bus: the rim in its colour for 5 s, and its rumble while force feedback is on. Sent alone, changes and saves nothing |
+| `test` | action | `center`, `detent`, `hardover`, `caution`, `warning` or `emergency`: plays that haptic (a level's rumble pattern; an emergency's three) at its own strength, only while force feedback is on; `alarm-caution`, `alarm-warning`, `alarm-emergency`, `alarm-fire`: that alarm as it would come, nothing put on the bus: its pattern once while force feedback is on, and the lights in its colour for the pattern's length and 2 s. Sent alone, changes and saves nothing |
 | `max_gain_pct` | yes | 0 … `gain_cap_pct` |
 | `spring_pct`, `damper_pct` | yes | 0 … 100 |
 | `rudder_max_deg` | yes | 1 … 90 |
@@ -125,9 +125,11 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `spring_boost` | yes | 1 … 3: how many times steeper the centring spring is near centre |
 | `hardover_warn_deg`, `hardover_pct` | yes | 0 … under `rudder_max_deg` (0: off); the warning's strength |
 | `speed_full_kn`, `speed_min_pct` | yes | 0 … 60 kn (0: off); the weight alongside, 0 … 100 % |
-| `alarm_caution_pct`, `alarm_warning_pct`, `alarm_emergency_pct` | yes | 0 … 100 (0: no rumble at that level) |
-| `alarm_leds`, `alarm_caution_color`, `alarm_warning_color`, `alarm_emergency_color` | yes | the rim in the alarm's colour (with `--base-serial`); `#rrggbb` |
-| `rim_leds`, `alarm_active` | no | the rim's state (`off`, `ready`, `showing warning`, `error: …`); the highest active alarm level |
+| `alarm_<kind>_pct` (caution, warning, emergency, fire) | yes | 0 … 100 (0: no rumble) |
+| `alarm_<kind>_pattern`, `alarm_<kind>_custom`, `alarm_<kind>_repeat_s` | yes | `one-short`, `two-short`, `three-short`, `one-long`, `general-alarm`, `man-overboard`, `fire`, `custom`; 1 … 16 of S/L; 0 … 60 s (0: once) |
+| `alarm_short_ms`, `alarm_long_ms`, `alarm_gap_ms` | yes | 80 … 600, 400 … 4000, 100 … 1500 |
+| `alarm_leds`, `alarm_base_light`, `alarm_<kind>_color` | yes | the rim's LEDs and the base's light bar in the alarm's colour (with `--base-serial`); `#rrggbb` |
+| `rim_leds`, `base_light`, `alarm_active` | no | each light's state (`off`, `ready`, `showing warning`, `error: …`); the highest active kind |
 | `lag_resistance_pct` | yes | 0 … 100 (0: off) |
 | `gain_cap_pct`, `ceiling_pct`, `has_ff`, `backend` | no | the cap, 60, whether the base has force feedback, `hid` / `evdev` |
 | `active`, `spring_source` | no | force feedback on the wheel; `center`, `rudder` or `off` |

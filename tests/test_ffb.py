@@ -404,48 +404,72 @@ def test_speed_makes_the_wheel_heavier_and_stale_speed_is_full_weight():
     assert [e for e in uploads(dev, codes.FF_SPRING) if e[6] == 0][-1][4] == model.coeff_level(100)
 
 
-def test_alarm_rumbles_per_level_once_per_alarm():
+def rumble_plays(dev):
+    """Each play of the rumble effect: (strength, duration ms) as it was uploaded for that play."""
+    uploaded, plays = {}, []
+    for e in dev.ff_log:
+        if e[0] == "click" and e[3] == model.RUMBLE_PERIOD_MS:
+            uploaded[e[1]] = (e[2], e[4])
+        elif e[0] == "play" and e[2] and e[1] in uploaded:
+            plays.append(uploaded[e[1]])
+    return plays
+
+
+def run(c, t0, t1, step=0.05):
+    t = t0
+    while t < t1:
+        c.tick(round(t, 3))
+        t += step
+
+
+def test_alarm_patterns_per_level_once_per_alarm():
     dev = fake()
     s = FfbSettings(mode=FfbMode.CENTER, alarm_caution_pct=20, alarm_warning_pct=50, center_mark_pct=0)
     c = FfbController(dev, s)
     c.start(0.0)
-    (upload,) = pulses(dev, model.RUMBLE_MS)
-    rumble_id = upload[1]
-    plays = lambda: dev.ff_log.count(("play", rumble_id, True))  # noqa: E731
-    assert not c.on_alarm("fire", 4, False, 1.0)  # emergency rumble is 0: nothing
-    assert c.on_alarm("cpa-1", 3, False, 1.0)  # a warning: three, at the warning's strength
-    assert pulses(dev, model.RUMBLE_MS)[-1][2] == model.coeff_level(50)
+    assert not c.on_alarm("fire", 4, False, 1.0)  # emergency strength is 0: nothing
+    assert c.on_alarm("cpa-1", 3, False, 1.0)  # a warning: two short, at its strength
     assert not c.on_alarm("cpa-1", 3, False, 1.1)  # the same alarm again: felt already
-    for t in (1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
-        c.tick(t)
-    assert plays() == 3
-    assert c.on_alarm("depth", 2, False, 5.0)  # a caution: one, lighter
-    assert pulses(dev, model.RUMBLE_MS)[-1][2] == model.coeff_level(20)
-    for t in (5.5, 6.0, 7.0):
-        c.tick(t)
-    assert plays() == 4
+    run(c, 1.0, 3.0)
+    assert rumble_plays(dev) == [(model.coeff_level(50), 250)] * 2
+    assert c.on_alarm("depth", 2, False, 5.0)  # a caution: one short, lighter
+    run(c, 5.0, 6.0)
+    assert rumble_plays(dev)[-1] == (model.coeff_level(20), 250) and len(rumble_plays(dev)) == 3
     c.on_alarm("cpa-1", 3, True, 8.0)  # acknowledged ...
     assert c.on_alarm("cpa-1", 3, False, 9.0)  # ... and raised again: felt again
-    assert c.top_alarm(9.0) == 4  # the emergency still counts (for the rim), rumble or not
+    assert c.top_alarm(9.0) == 4  # the emergency still counts (for the lights), rumble or not
     assert c.top_alarm(9.0 + model.ALARM_HOLD_S + 1) is None  # nothing repeated: over
 
 
-def test_an_emergency_rumbles_until_it_is_over():
+def test_an_emergency_repeats_its_long_rumble_until_it_is_over():
     dev = fake()
     c = FfbController(dev, FfbSettings(mode=FfbMode.CENTER, alarm_emergency_pct=80, center_mark_pct=0))
     c.start(0.0)
-    rumble_id = pulses(dev, model.RUMBLE_MS)[0][1]
-    plays = lambda: dev.ff_log.count(("play", rumble_id, True))  # noqa: E731
-    assert c.on_alarm("fire", 4, False, 1.0)
-    for t in range(2, 12):
-        c.tick(float(t))
-    assert plays() == 6  # at 1, 3, 5, 7, 9, 11
-    c.on_alarm("fire", 4, True, 11.5)  # acknowledged: over
-    for t in range(12, 20):
-        c.tick(float(t))
-    assert plays() == 6
+    assert c.on_alarm("grounding", 4, False, 1.0)
+    run(c, 1.0, 12.0)  # one long (800 + 700 ms) at 1, 6 and 11 s
+    assert rumble_plays(dev) == [(model.coeff_level(80), 800), (model.coeff_level(80), 700)] * 3
+    c.on_alarm("grounding", 4, True, 12.5)  # acknowledged: over
+    run(c, 12.5, 20.0)
+    assert len(rumble_plays(dev)) == 6
     c.shutdown()
     assert effect_ids(dev) == {e[1] for e in dev.ff_log if e[0] == "erase"}
+
+
+def test_a_fire_alarm_is_fire_whatever_its_level_and_preempts():
+    dev = fake()
+    s = FfbSettings(mode=FfbMode.CENTER, alarm_warning_pct=30, alarm_fire_pct=90, center_mark_pct=0)
+    c = FfbController(dev, s)
+    c.start(0.0)
+    assert c.on_alarm("cpa", 3, False, 1.0)
+    assert c.on_alarm("engine-room", 3, False, 1.1, category=model.FIRE_CATEGORY)  # fire beats the warning
+    run(c, 1.1, 5.0)  # continuous: one long, a gap, again
+    plays = rumble_plays(dev)
+    assert plays[-1][0] == model.coeff_level(90) and sum(d for lvl, d in plays if lvl == model.coeff_level(90)) >= 3000
+    assert not c.on_alarm("cpa2", 4, False, 5.0)  # an emergency does not interrupt a fire
+    c.on_alarm("engine-room", 3, True, 6.0, category=model.FIRE_CATEGORY)
+    n = len(rumble_plays(dev))
+    run(c, 6.0, 9.0)
+    assert len(rumble_plays(dev)) == n  # over
 
 
 def test_lag_resistance_damps_while_the_rudder_trails():
@@ -496,18 +520,13 @@ def test_test_pulse_plays_each_haptic_at_its_own_strength():
     (click,) = pulses(dev, model.CLICK_DURATION_MS)
     assert click[2] == model.coeff_level(50)
 
-    rumble_id = pulses(dev, model.RUMBLE_MS)[0][1]
-    c.test_pulse("warning", 2.0)  # the warning's three, at its strength
-    for t in (2.5, 3.0, 3.5, 4.0, 4.5):
-        c.tick(t)
-    assert dev.ff_log.count(("play", rumble_id, True)) == 3
-    assert pulses(dev, model.RUMBLE_MS)[-1][2] == model.coeff_level(40)
-    c.test_pulse("emergency", 10.0)  # would go on while it lasts: a Try plays a few
-    for t in range(11, 20):
-        c.tick(float(t))
-    assert dev.ff_log.count(("play", rumble_id, True)) == 3 + model.TEST_RUMBLES
-
-    c.update(replace(s, spring_pct=40), 5.0)  # a settings change frees what is off again
+    c.test_pulse("warning", 2.0)  # the warning's two short, at its strength
+    run(c, 2.0, 4.0)
+    assert rumble_plays(dev) == [(model.coeff_level(40), 250)] * 2
+    c.test_pulse("emergency", 10.0)  # would repeat while it lasts: a Try plays it once
+    run(c, 10.0, 25.0)
+    assert rumble_plays(dev)[2:] == [(model.coeff_level(90), 800), (model.coeff_level(90), 700)]
+    c.update(replace(s, spring_pct=40), 30.0)  # a settings change frees what is off again
     assert ("erase", hardover[1]) in dev.ff_log and ("erase", click[1]) in dev.ff_log
     c.shutdown()
     assert effect_ids(dev) == {e[1] for e in dev.ff_log if e[0] == "erase"}

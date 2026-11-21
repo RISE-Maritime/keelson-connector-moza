@@ -105,7 +105,8 @@ class FakeBaseSerial:
         self._file = path
         self.values = {"limit": angle, "max-angle": angle}
         if rim:
-            self.values |= {n: 0x56F7FC for n in proto.RIM_COLORS} | {n: 50 for n in proto.RIM_BRIGHTNESS}
+            self.values |= {n: 0x56F7FC for n in proto.RIM_COLORS}
+            self.values |= {n: 0x56F7FC for n in proto.BASE_LIGHT} | {"base-standby-mode": 1}
         if path:
             try:
                 with open(path) as f:

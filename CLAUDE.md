@@ -19,10 +19,11 @@ A Moza direct-drive wheelbase (R21 Ultra) as a keelson helm (README). It publish
 - **HID effects are leased.** macOS doesn't erase a dead process's effects, so every HID effect has a finite duration (`EFFECT_LEASE_MS`) and is renewed while it plays. Never make one infinite. A click (`upload_click`) is the exception to renewal: it is never renewed, and its own duration may not exceed a lease.
 - **The base's own steering angle (the hard stop) is opt-in, narrow-only-when-safe and always put back.**
   - Only with `--base-serial`, and only to a port whose USB vendor id is Moza's (0x346E).
-  - The `writable` commands in `serial_proto.COMMANDS` are the whole allow-list: the base's steering angle (`limit`, `max-angle`) and the rim's LED colours and brightness. Never the torque, the FFB strength, `ffb-disable` or the soft-limit strength: the gain ceiling stays the only strength control.
+  - The `writable` commands in `serial_proto.COMMANDS` are the whole allow-list: the base's steering angle (`limit`, `max-angle`), the rim's LED colours, and the base light bar's standby mode and colours (main controller 0x12). Never the torque, the FFB strength, `ffb-disable` or the soft-limit strength: the gain ceiling stays the only strength control.
   - A narrower angle is written only while the wheel is inside it by `BASE_WHEEL_MARGIN_DEG`; wider at once. Never under `BASE_MIN_RANGE_DEG`, never wider than the angle read at start.
   - The angle read at start is put back on every exit (`BaseStop.restore()`, after `FfbController.shutdown()`, never raises). What to put back is saved (`base_restore`) before narrowing, so the next start undoes a crash first.
-- **The rim's colours always come back.** Like the steering angle: read at start, saved (`rim_restore`) before an alarm colour is shown, put back when the alarm is over and on every exit (`RimLeds.restore()`, never raises). `RimLeds.sync` never raises: a rim that stops answering loses its colours, never the helm.
+- **The lights' own colours always come back, and are never flashed.** The rim's colours and the base bar's colours and mode are stored device settings: read at start, saved (`lights_restore`) before an alarm colour is shown, written once per change, put back when the alarm is over and on every exit (`AlarmLights.restore()`, never raises). `AlarmLights.sync` never raises: a device that stops answering loses its colours, never the helm.
+- **A long rumble is several plays.** Every play of the rumble effect is at most `SEGMENT_MAX_MS` (under a lease) and never renewed; a longer symbol is plays back to back.
 - **The fake device is for the tests only.** `--fake-device` and `--base-serial fake` are refused unless `MOZA_CONNECTOR_TESTING=1`.
 - **No loopback.** The connector subscribes only to `rudder_angle_deg`, which it never publishes. If it ever needs to subscribe to a subject it also publishes, filter out its own source id first.
 - **No control authority.** The connector publishes operator input; who holds the conn is decided elsewhere.
@@ -48,7 +49,7 @@ A Moza direct-drive wheelbase (R21 Ultra) as a keelson helm (README). It publish
 | `serial_proto.py` | The Moza serial framing for the base's steering angle (pure; pinned to captured frames) |
 | `base_serial.py` | The base's serial port (pyserial, Moza vendor id only), `FakeBaseSerial` |
 | `base_stop.py` | `BaseStop`: the hard end stop, setting the base's angle to the helm's lock and putting it back |
-| `rim_leds.py` | `RimLeds`: the rim's LEDs in the highest active alarm's colour, its own colours put back |
+| `alarm_lights.py` | `AlarmLights`: the rim's LEDs and the base's light bar in the highest active alarm's colour, their own put back |
 | `store.py` | The settings file: the wheel's setup, the default and your profiles, read at start, written after each remote change (I/O only; the rules are `model.load_state`) |
 | `app.py` | CLI, Zenoh session, liveliness, rudder subscriber, backstop and force-feedback threads |
 

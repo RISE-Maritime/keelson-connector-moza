@@ -453,12 +453,16 @@ def test_an_alarm_colours_the_rim_until_acknowledged(h, monkeypatch):
     key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
     wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
     assert json.loads(rpc(h, "get_config")[1])["rim_leds"] == "ready"
-    assert rpc(h, "set_config", json.dumps({"alarm_leds": True, "alarm_warning_color": "#ff8800"}).encode())[0]
+    assert json.loads(rpc(h, "get_config")[1])["base_light"] == "ready"
+    assert rpc(h, "set_config", json.dumps({"alarm_leds": True, "alarm_base_light": True, "alarm_warning_color": "#ff8800",
+                                            "alarm_fire_color": "#ff00aa"}).encode())[0]
     pub = h.session.declare_publisher(f"{BASE}/alarm/test/cpa")
 
-    def alarm(acknowledged):
-        a = Alarm(identifier="cpa-1", priority=Alarm.PRIORITY_WARNING, acknowledged=acknowledged)
+    def alarm(acknowledged, ident="cpa-1", category=Alarm.CATEGORY_NAVIGATION):
+        a = Alarm(identifier=ident, priority=Alarm.PRIORITY_WARNING, acknowledged=acknowledged, category=category)
         pub.put(keelson.enclose(a.SerializeToString()))
+
+    bar = lambda: json.loads(base_file.read_text())["base-color0-0"]  # noqa: E731
 
     colour = lambda: json.loads(base_file.read_text())["rpm-color1"]  # noqa: E731
     wait(lambda: alarm(False) or colour() == 0xFF8800, what="the rim in the warning's colour")
@@ -469,6 +473,11 @@ def test_an_alarm_colours_the_rim_until_acknowledged(h, monkeypatch):
     wait(lambda: colour() == 0xFF8800, what="raised again")
     alarm(True)
     wait(lambda: colour() == 0x56F7FC, what="acknowledged again")
+    # A fire alarm, sent at warning level: fire, on the rim and the base's light bar.
+    fire = lambda ack: alarm(ack, "engine-room", Alarm.CATEGORY_FIRE_ALARM)  # noqa: E731
+    wait(lambda: fire(False) or (colour() == 0xFF00AA and bar() == 0xFF00AA), what="both in the fire colour")
+    assert json.loads(rpc(h, "get_config")[1])["alarm_active"] == "fire"
+    wait(lambda: fire(True) or (colour() == 0x56F7FC and bar() == 0x56F7FC), what="both back")
     # Try: an emergency as it would come, nothing on the bus. Force feedback is off here:
     # the colour only, said in the log, not refused.
     assert rpc(h, "set_config", json.dumps({"test": "alarm-emergency"}).encode())[0]

@@ -451,13 +451,36 @@ def test_damper_with_lag_resistance():
     assert model.damper_pct_now(FfbSettings(damper_pct=90, lag_resistance_pct=50), 1.0, 9) == 100
 
 
-def test_alarm_levels_patterns_and_the_board():
-    assert [model.alarm_level(p) for p in (0, 1, 2, 3, 4, 5)] == [None, None, "caution", "warning", "emergency", "emergency"]
-    assert model.rumble_due("caution", 10.0, 0, 10.0) and not model.rumble_due("caution", 10.0, 1, 99.0)
-    assert model.rumble_due("warning", 10.0, 1, 11.0) and not model.rumble_due("warning", 10.0, 1, 10.5)
-    assert model.rumble_due("emergency", 10.0, 50, 110.0)  # goes on while it lasts ...
-    assert not model.rumble_due("emergency", 10.0, 3, 99.0, limit=3)  # ... but a Try stops
-    assert model.RUMBLE_MS < 1000  # inside a lease
+def test_patterns_follow_the_ships_signals():
+    s = FfbSettings(alarm_short_ms=250, alarm_long_ms=1500, alarm_gap_ms=300)
+    assert model.alarm_schedule(s, "caution") == ([(0, 250)], False)
+    assert model.alarm_schedule(s, "warning") == ([(0, 250), (550, 250)], False)  # two short
+    assert model.alarm_schedule(s, "emergency") == ([(0, 800), (800, 700)], False)  # one long, under leases
+    general = model.alarm_schedule(replace(s, alarm_warning_pattern="general-alarm"), "warning")[0]
+    assert len(general) == 7 + 2 and general[6] == (6 * 550, 250) and general[7] == (7 * 550, 800)
+    mob, _ = model.alarm_schedule(replace(s, alarm_caution_pattern="man-overboard"), "caution")
+    assert model.pattern_length_ms(mob) == 3 * 1500 + 2 * 300
+    assert model.alarm_schedule(s, "fire")[1] is True  # continuous
+    custom = replace(s, alarm_caution_pattern="custom", alarm_caution_custom="SLS")
+    assert [d for _, d in model.alarm_schedule(custom, "caution")[0]] == [250, 800, 700, 250]
+    assert all(d <= model.SEGMENT_MAX_MS < 1000 for _, d in general + mob)  # every play inside a lease
+
+
+def test_repeats_and_continuous_periods():
+    s = FfbSettings()
+    sched, cont = model.alarm_schedule(s, "emergency")
+    assert model.pattern_period_s(s, "emergency", sched, cont) == 5.0
+    assert model.pattern_period_s(s, "warning", *model.alarm_schedule(s, "warning")) is None  # once
+    fire, cont = model.alarm_schedule(s, "fire")
+    assert model.pattern_period_s(s, "fire", fire, cont) == (1500 + 300) / 1000
+    quick = replace(s, alarm_emergency_repeat_s=0.5)  # never overlapping itself
+    assert model.pattern_period_s(quick, "emergency", sched, False) == (1500 + 300) / 1000
+
+
+def test_kinds_ranks_and_the_board():
+    assert [model.alarm_rank(p) for p in (2, 3, 4, 5)] == [2, 3, 4, 4]
+    assert model.alarm_rank(3, model.FIRE_CATEGORY) == model.ALARM_RANKS["fire"]  # fire overrides the level
+    assert [model.alarm_kind(r) for r in (0, 2, 3, 4, 5)] == [None, "caution", "warning", "emergency", "fire"]
     board, fresh = model.alarm_seen({}, "cpa", 3, False, 0.0)
     assert fresh and model.alarm_top(board, 0.0) == 3
     board, fresh = model.alarm_seen(board, "cpa", 3, False, 5.0)
@@ -468,26 +491,26 @@ def test_alarm_levels_patterns_and_the_board():
     assert model.alarm_top(board, 7.5) == 4
     board, _ = model.alarm_seen(board, "cpa", 4, True, 9.0)
     assert model.alarm_top(board, 9.0) is None  # acknowledged, and the caution expired
-    assert model.alarm_top(model.alarm_seen({}, "x", 2, False, 0.0)[0], model.ALARM_HOLD_S + 1) is None  # not repeated
+    assert model.alarm_top(model.alarm_seen({}, "x", 2, False, 0.0)[0], model.ALARM_HOLD_S + 1) is None
 
 
-def test_alarm_colours_on_the_rim():
+def test_alarm_colours_and_settings_checks():
     s = FfbSettings(alarm_leds=True)
-    assert model.rim_led_state(s, 2, 0.0) == (0xFFD400, False)
-    assert model.rim_led_state(s, 3, 0.0) == (0xFF7A00, False)
-    assert model.rim_led_state(s, 4, 0.1) == (0xFF0000, False)
-    assert model.rim_led_state(s, 4, 0.6) == (0xFF0000, True)  # an emergency flashes
-    assert model.rim_led_state(s, None, 0.0) == (None, False)
-    assert model.rim_led_state(FfbSettings(alarm_leds=False), 4, 0.0) == (None, False)
-    new = model.apply_config(s, {"alarm_caution_color": "#00FF88"}, gain_cap_pct=30, read_only={})
-    assert new.alarm_caution_color == "#00ff88"
-    with pytest.raises(ValueError, match="#rrggbb"):
-        model.apply_config(s, {"alarm_warning_color": "orange"}, gain_cap_pct=30, read_only={})
+    assert model.alarm_light_color(s, 2, "rim") == 0xFFD400 and model.alarm_light_color(s, 5, "rim") == 0xFF0000
+    assert model.alarm_light_color(s, 3, "base") is None  # the base bar is off
+    assert model.alarm_light_color(s, None, "rim") is None
+    new = model.apply_config(s, {"alarm_caution_color": "#00FF88", "alarm_warning_pattern": "man-overboard",
+                                 "alarm_fire_custom": "sls"}, gain_cap_pct=30, read_only={})
+    assert (new.alarm_caution_color, new.alarm_warning_pattern, new.alarm_fire_custom) == ("#00ff88", "man-overboard", "SLS")
+    for bad in ({"alarm_warning_color": "orange"}, {"alarm_caution_pattern": "siren"}, {"alarm_caution_custom": "SXL"},
+                {"alarm_caution_custom": "S" * 17}, {"alarm_long_ms": 9000}):
+        with pytest.raises(ValueError):
+            model.apply_config(s, bad, gain_cap_pct=30, read_only={})
 
 
 def test_settings_from_before_per_level_alarms_are_upgraded():
     assert model.upgrade_alarm_keys({"alarm_rumble_pct": 40, "alarm_min_priority": "warning", "spring_pct": 1}) == {
-        "spring_pct": 1, "alarm_caution_pct": 0.0, "alarm_warning_pct": 40, "alarm_emergency_pct": 40}
+        "spring_pct": 1, "alarm_caution_pct": 0.0, "alarm_warning_pct": 40, "alarm_emergency_pct": 40, "alarm_fire_pct": 40}
     assert model.upgrade_alarm_keys({"spring_pct": 1}) == {"spring_pct": 1}
 
 
