@@ -109,6 +109,18 @@ class FfbSettings:
     #: How many times steeper the centring spring is near centre (1..3): that many springs,
     #: each with that share of the saturation, so the far pull is unchanged.
     spring_boost: float = 1.0
+    #: A distinct pulse when the rudder order reaches this many degrees either way (0: none).
+    hardover_warn_deg: float = 0.0
+    hardover_pct: float = 80.0
+    #: Speed-sensitive weight: spring and damper at ``speed_min_pct`` alongside, full from
+    #: ``speed_full_kn`` over the ground (0: off).
+    speed_full_kn: float = 0.0
+    speed_min_pct: float = 40.0
+    #: A rumble for a new, unacknowledged alarm at or above ``alarm_min_priority`` (0: none).
+    alarm_rumble_pct: float = 0.0
+    alarm_min_priority: str = "warning"
+    #: Extra damping while the rudder trails the wheel's order (0: none).
+    lag_resistance_pct: float = 0.0
 
     @property
     def deadband_pct(self) -> float:
@@ -216,8 +228,16 @@ CONFIG_BOUNDS = {
     "center_mark_pct": (0.0, 100.0),
     "center_deadband_deg": (0.0, 30.0),  # and under half the wheel lock
     "spring_boost": (1.0, 3.0),
+    "hardover_warn_deg": (0.0, 89.0),  # and under rudder_max_deg
+    "hardover_pct": (0.0, 100.0),
+    "speed_full_kn": (0.0, 60.0),
+    "speed_min_pct": (0.0, 100.0),
+    "alarm_rumble_pct": (0.0, 100.0),
+    "lag_resistance_pct": (0.0, 100.0),
 }
-CONFIG_WRITABLE = ("mode", "max_gain_pct", *CONFIG_BOUNDS, "rudder_invert")
+#: keelson.Alarm.Priority values a rumble may start from.
+ALARM_PRIORITIES = {"caution": 2, "warning": 3, "emergency": 4}
+CONFIG_WRITABLE = ("mode", "max_gain_pct", *CONFIG_BOUNDS, "rudder_invert", "alarm_min_priority")
 
 
 def config_of(settings: FfbSettings) -> dict:
@@ -238,6 +258,13 @@ def config_of(settings: FfbSettings) -> dict:
         "center_mark_pct": settings.center_mark_pct,
         "center_deadband_deg": settings.center_deadband_deg,
         "spring_boost": settings.spring_boost,
+        "hardover_warn_deg": settings.hardover_warn_deg,
+        "hardover_pct": settings.hardover_pct,
+        "speed_full_kn": settings.speed_full_kn,
+        "speed_min_pct": settings.speed_min_pct,
+        "alarm_rumble_pct": settings.alarm_rumble_pct,
+        "alarm_min_priority": settings.alarm_min_priority,
+        "lag_resistance_pct": settings.lag_resistance_pct,
     }
 
 
@@ -268,6 +295,10 @@ def apply_config(
                 changes["mode"] = FfbMode(value)
             except ValueError:
                 raise ValueError(f"mode must be one of {[m.value for m in FfbMode]}, got {value!r}") from None
+        elif key == "alarm_min_priority":
+            if value not in ALARM_PRIORITIES:
+                raise ValueError(f"alarm_min_priority must be one of {list(ALARM_PRIORITIES)}, got {value!r}")
+            changes[key] = value
         elif key == "rudder_invert":
             if not isinstance(value, bool):
                 raise ValueError(f"rudder_invert must be true or false, got {value!r}")
@@ -281,6 +312,10 @@ def apply_config(
                 raise ValueError(f"{key} {value:g} outside {lo:g}..{hi:g}{what}")
             changes[key] = float(value)
     new = replace(settings, **changes)
+    if new.hardover_warn_deg > 0 and new.hardover_warn_deg >= new.rudder_max_deg:
+        raise ValueError(
+            f"hardover_warn_deg {new.hardover_warn_deg:g} must be under rudder_max_deg {new.rudder_max_deg:g}"
+        )
     if new.center_deadband_deg >= new.wheel_lock_deg / 2.0:
         raise ValueError(
             f"center_deadband_deg {new.center_deadband_deg:g} must be under half of wheel_lock_deg "
@@ -509,6 +544,8 @@ def preset_list(user: dict | None = None) -> list[dict]:
 BEHAVIOUR_KEYS = (
     "mode", "spring_pct", "spring_boost", "damper_pct", "endstop_pct", "wheel_lock_deg",
     "center_deadband_deg", "rudder_max_deg", "detent_deg", "detent_pct", "center_mark_pct",
+    "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct", "alarm_rumble_pct",
+    "alarm_min_priority", "lag_resistance_pct",
 )
 
 
@@ -661,3 +698,72 @@ def center_reached(side: int | None, new: int) -> bool:
 def center_mark_level(settings: FfbSettings) -> int:
     """The centre mark's magnitude (s16, 0..0x7FFF)."""
     return coeff_level(settings.center_mark_pct)
+
+
+# --- Haptics: hard-over warning, speed-sensitive weight, alarm rumble, gear lag ------------
+
+#: The hard-over warning: longer than a click, shorter than the centre mark's double.
+HARDOVER_MS = 45
+#: Out of the warning zone only this far back inside it, so a helm held at the line is quiet.
+HARDOVER_HYSTERESIS_DEG = 2.0
+
+
+def hardover_side(order_deg: float, side: int | None, warn_deg: float) -> int:
+    """+-1 while the rudder order is at or past +-``warn_deg``, else 0 (with hysteresis)."""
+    if warn_deg <= 0:
+        return 0
+    if abs(order_deg) >= warn_deg or (side and abs(order_deg) > warn_deg - HARDOVER_HYSTERESIS_DEG
+                                      and (order_deg > 0) == (side > 0)):
+        return 1 if order_deg > 0 else -1
+    return 0
+
+
+def hardover_reached(side: int | None, new: int) -> bool:
+    """Warn on entering a warning zone (never on leaving, never for the first reading)."""
+    return side is not None and new != 0 and new != side
+
+
+#: Speed over ground older than this counts as no speed: the wheel keeps its full weight.
+SPEED_STALE_S = 2.0
+#: Re-upload the spring and damper only when the weight moves by more than this.
+WEIGHT_STEP = 0.02
+
+
+def speed_weight(settings: FfbSettings, sog_kn: float | None, age_s: float | None) -> float:
+    """How heavy the wheel is (0..1) for the speed over ground: ``speed_min_pct`` alongside,
+    full at ``speed_full_kn``. Off, or without a fresh speed, it is full: never lighter than
+    set on old data."""
+    if settings.speed_full_kn <= 0 or sog_kn is None or age_s is None or not 0 <= age_s <= SPEED_STALE_S:
+        return 1.0
+    low = settings.speed_min_pct / 100.0
+    return low + (1.0 - low) * clamp(abs(sog_kn) / settings.speed_full_kn, 0.0, 1.0)
+
+
+#: Gear lag: the extra damping is full once the rudder trails the order by this much.
+LAG_FULL_DEG = 5.0
+
+
+def damper_pct_now(settings: FfbSettings, weight: float, lag_deg: float | None) -> float:
+    """The damper this instant: the set damper, scaled by the speed weight, plus the lag
+    resistance while the rudder trails the order (``lag_deg`` None: no fresh rudder)."""
+    extra = 0.0
+    if settings.lag_resistance_pct > 0 and lag_deg is not None:
+        extra = settings.lag_resistance_pct * clamp(abs(lag_deg) / LAG_FULL_DEG, 0.0, 1.0)
+    return clamp(settings.damper_pct * weight + extra, 0.0, 100.0)
+
+
+#: The alarm rumble: a quick square for RUMBLE_MS, RUMBLE_COUNT times, RUMBLE_EVERY_S apart.
+RUMBLE_PERIOD_MS = 25
+RUMBLE_MS = 400
+RUMBLE_COUNT = 3
+RUMBLE_EVERY_S = 1.0
+
+
+def alarm_rumbles(settings: FfbSettings, priority: int, acknowledged: bool) -> bool:
+    """A rumble for this alarm: rumble on, not acknowledged, at or above the set priority."""
+    return settings.alarm_rumble_pct > 0 and not acknowledged and priority >= ALARM_PRIORITIES[settings.alarm_min_priority]
+
+
+def rumble_due(started_at: float, played: int, now: float) -> bool:
+    """Whether the next pulse of a rumble that started at ``started_at`` is due."""
+    return played < RUMBLE_COUNT and now - started_at >= played * RUMBLE_EVERY_S

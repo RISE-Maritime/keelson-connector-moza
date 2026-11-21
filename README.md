@@ -40,6 +40,17 @@ Wiring `wheel_position_pct/moza_r21/wheel` to a vehicle is the consumer's job; f
 - **Centring boost** (`--ffb-spring-boost`, 1–3, default 1): stacks that many centring springs, each with its share of the saturation, so the pull near centre is that many times steeper while the pull far from centre is unchanged. The wheel settles closer to centre.
 - **The strongest lever** is still a smaller steering angle on the base in Pit House, or a higher gain cap, since the pull per degree scales with both.
 
+**Haptics.** Four more ways the wheel speaks, each off until set (`--ffb-…` flags, or the panel's Haptics group). They work in every mode while force feedback is on, and none is ever renewed or longer than a lease.
+
+| Haptic | Setting | What the helmsman feels |
+|---|---|---|
+| Hard-over warning | `hardover_warn_deg`, `hardover_pct` | A 45 ms pulse when the rudder order reaches that angle either way, before the end stop. Quiet until the order comes back 2° inside. |
+| Speed-sensitive weight | `speed_full_kn`, `speed_min_pct` | Spring and damper at `speed_min_pct` alongside, rising to full at `speed_full_kn` over the ground (`speed_over_ground_knots` on the vessel's entity). A speed over 2 s old counts as none: full weight, never lighter on old data. |
+| Alarm rumble | `alarm_rumble_pct`, `alarm_min_priority` | Three 400 ms rumbles, a second apart, for each new unacknowledged `alarm` at or above the priority. Once per alarm; acknowledged and raised again, it rumbles again. |
+| Gear-lag resistance | `lag_resistance_pct` | Extra damping while the actual rudder trails the order, full once it trails by 5°: turn faster than the steering gear and the wheel resists. No fresh rudder, no extra. |
+
+When the base's effect pool is full, a haptic that can't be loaded is logged and left out; the wheel keeps working.
+
 **The centre mark.** In every mode, while force feedback is on, the wheel gives a distinct pulse each time it reaches centre (`--ffb-center-mark-pct`, default 80; 0 for none). It lasts 60 ms, twice a detent click, so centre feels different from a notch. Centre is within 1° of wheel rotation, and is left only past 2°, so a wheel resting there doesn't buzz. Passing straight over centre between two readings also marks it; leaving it doesn't. No preset changes it.
 
 In every mode except `off`, the connector also adds a damper (`--ffb-damper-pct`, 0 to disable) and switches off the base's own autocentre so the two don't fight.
@@ -97,6 +108,10 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `center_mark_pct` | yes | 0 … 100: the centre mark's strength, 0 for none |
 | `center_deadband_deg` | yes | 0 … 30, under half the lock: wheel degrees either side of centre that order exactly 0 |
 | `spring_boost` | yes | 1 … 3: how many times steeper the centring spring is near centre |
+| `hardover_warn_deg`, `hardover_pct` | yes | 0 … under `rudder_max_deg` (0: off); the warning's strength |
+| `speed_full_kn`, `speed_min_pct` | yes | 0 … 60 kn (0: off); the weight alongside, 0 … 100 % |
+| `alarm_rumble_pct`, `alarm_min_priority` | yes | 0 … 100 (0: off); `caution`, `warning` or `emergency` |
+| `lag_resistance_pct` | yes | 0 … 100 (0: off) |
 | `gain_cap_pct`, `ceiling_pct`, `has_ff`, `backend` | no | the cap, 60, whether the base has force feedback, `hid` / `evdev` |
 | `active`, `spring_source` | no | force feedback on the wheel; `center`, `rudder` or `off` |
 
@@ -257,6 +272,13 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
                     [--ffb-detent-pct FFB_DETENT_PCT]
                     [--ffb-spring-boost FFB_SPRING_BOOST]
                     [--ffb-center-mark-pct FFB_CENTER_MARK_PCT]
+                    [--ffb-hardover-warn-deg FFB_HARDOVER_WARN_DEG]
+                    [--ffb-hardover-pct FFB_HARDOVER_PCT]
+                    [--ffb-speed-full-kn FFB_SPEED_FULL_KN]
+                    [--ffb-speed-min-pct FFB_SPEED_MIN_PCT]
+                    [--ffb-alarm-rumble-pct FFB_ALARM_RUMBLE_PCT]
+                    [--ffb-alarm-min-priority {caution,warning,emergency}]
+                    [--ffb-lag-resistance-pct FFB_LAG_RESISTANCE_PCT]
                     [--settings-file SETTINGS_FILE] [--ffb-remote]
 ```
 

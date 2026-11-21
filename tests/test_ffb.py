@@ -363,3 +363,88 @@ def test_spring_boost_changes_while_running_and_follow_up_moves_every_layer():
     c.update(replace(s, spring_boost=1), 3.0)
     erased = {e[1] for e in dev.ff_log if e[0] == "erase"}
     assert len(ids - erased) == 1 and first not in erased
+
+
+def pulses(dev, duration_ms):
+    return [e for e in dev.ff_log if e[0] == "click" and e[4] == duration_ms]
+
+
+def test_hardover_warning_pulses_on_entering_the_zone():
+    dev = fake()
+    s = FfbSettings(mode=FfbMode.CENTER, rudder_max_deg=35, hardover_warn_deg=30, center_mark_pct=0)
+    c = FfbController(dev, s)
+    c.on_wheel(0.0, 0.0)
+    c.start(0.0)
+    (warn,) = pulses(dev, model.HARDOVER_MS)
+    pct = 100 / 35
+    assert not c.on_wheel(29.0 * pct, 0.1)
+    assert c.on_wheel(30.5 * pct, 0.2)
+    assert not c.on_wheel(29.0 * pct, 0.3)  # resting by the line
+    assert not c.on_wheel(35.0 * pct, 0.4)  # still in the zone
+    assert not c.on_wheel(20.0 * pct, 0.5)  # leaving: nothing
+    assert c.on_wheel(-32.0 * pct, 0.6)
+    assert dev.ff_log.count(("play", warn[1], True)) == 2
+
+
+def test_speed_makes_the_wheel_heavier_and_stale_speed_is_full_weight():
+    dev = fake()
+    s = FfbSettings(mode=FfbMode.CENTER, spring_pct=100, damper_pct=50, speed_full_kn=10, speed_min_pct=40)
+    c = FfbController(dev, s)
+    c.on_speed(0.0, 0.0)
+    c.start(0.0)
+    c.tick(0.1)
+    spring = [e for e in uploads(dev, codes.FF_SPRING) if e[6] == 0][-1]
+    assert spring[4] == model.coeff_level(40)  # alongside: 40 % of the spring
+    assert uploads(dev, codes.FF_DAMPER)[-1][4] == model.coeff_level(20)
+    c.on_speed(10.0, 1.0)
+    c.tick(1.1)
+    assert [e for e in uploads(dev, codes.FF_SPRING) if e[6] == 0][-1][4] == model.coeff_level(100)
+    c.on_speed(0.0, 2.0)
+    c.tick(2.0 + model.SPEED_STALE_S + 0.5)  # the speed went quiet: full weight, never lighter
+    assert [e for e in uploads(dev, codes.FF_SPRING) if e[6] == 0][-1][4] == model.coeff_level(100)
+
+
+def test_alarm_rumble_three_pulses_once_per_alarm():
+    dev = fake()
+    c = FfbController(dev, FfbSettings(mode=FfbMode.CENTER, alarm_rumble_pct=60, center_mark_pct=0))
+    c.start(0.0)
+    (rumble,) = pulses(dev, model.RUMBLE_MS)
+    assert not c.on_alarm("cpa-1", 2, False, 1.0)  # caution: below "warning"
+    assert c.on_alarm("cpa-1", 3, False, 1.0)
+    assert not c.on_alarm("cpa-1", 3, False, 1.1)  # the same alarm again: felt already
+    for t in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
+        c.tick(t)
+    assert dev.ff_log.count(("play", rumble[1], True)) == model.RUMBLE_COUNT
+    c.on_alarm("cpa-1", 3, True, 5.0)  # acknowledged ...
+    assert c.on_alarm("cpa-1", 3, False, 6.0)  # ... and raised again: felt again
+
+
+def test_lag_resistance_damps_while_the_rudder_trails():
+    dev = fake()
+    s = FfbSettings(mode=FfbMode.DETENT, damper_pct=0, lag_resistance_pct=60, rudder_max_deg=35, detent_pct=0)
+    c = FfbController(dev, s)
+    c.start(0.0)
+    damper_id = uploads(dev, codes.FF_DAMPER)[0][2]
+    assert uploads(dev, codes.FF_DAMPER)[-1][4] == 0  # nothing trails yet
+    c.on_wheel(100.0, 0.1)  # hard over: 35 deg ordered
+    c.on_rudder(5.0, 0.1)  # the gear has 5 deg so far
+    c.tick(0.2)
+    assert uploads(dev, codes.FF_DAMPER)[-1][2:5] == (damper_id, 0, model.coeff_level(60))
+    c.on_rudder(35.0, 0.3)  # caught up
+    c.tick(0.4)
+    assert uploads(dev, codes.FF_DAMPER)[-1][4] == 0
+    c.tick(0.3 + s.stale_s + 1)  # the rudder went quiet: no extra damping either
+    assert uploads(dev, codes.FF_DAMPER)[-1][4] == 0
+
+
+def test_everything_on_fits_the_bases_ten_effects_and_all_are_released():
+    dev = fake()
+    s = FfbSettings(mode=FfbMode.DETENT, damper_pct=20, spring_boost=3, wheel_lock_deg=90, hardover_warn_deg=30,
+                    alarm_rumble_pct=50, lag_resistance_pct=20)
+    c = FfbController(dev, s)
+    c.start(0.0)
+    c.update(replace(s, mode=FfbMode.CENTER), 1.0)  # springs as well as the clicks of detent mode
+    live = effect_ids(dev) - {e[1] for e in dev.ff_log if e[0] == "erase"}
+    assert len(live) <= 10, live
+    c.shutdown()
+    assert effect_ids(dev) == {e[1] for e in dev.ff_log if e[0] == "erase"}

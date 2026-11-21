@@ -13,6 +13,7 @@ from pathlib import Path
 
 import keelson
 import zenoh
+from keelson.payloads.Alarm_pb2 import Alarm
 from keelson.payloads.Primitives_pb2 import TimestampedFloat
 from keelson.scaffolding import (
     GracefulShutdown,
@@ -38,6 +39,11 @@ log = logging.getLogger("moza2keelson")
 TESTING_ENV = "MOZA_CONNECTOR_TESTING"
 
 EXIT_OK, EXIT_FAILED, EXIT_NO_DEVICE, EXIT_DEVICE_LOST = 0, 1, 2, 3
+#: The haptics' settings, each from --ffb-<key with dashes>.
+HAPTIC_KEYS = (
+    "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct",
+    "alarm_rumble_pct", "alarm_min_priority", "lag_resistance_pct",
+)
 FFB_HZ = 20.0
 POLL_S = 0.05
 
@@ -130,6 +136,16 @@ def parser() -> argparse.ArgumentParser:
         default=80.0,
         help="A distinct pulse each time the wheel reaches centre, in every mode; 0 for none",
     )
+    h = p.add_argument_group("haptics (each off by default)")
+    h.add_argument("--ffb-hardover-warn-deg", type=float, default=0.0, help="A pulse at this rudder order, either way")
+    h.add_argument("--ffb-hardover-pct", type=float, default=80.0, help="The hard-over pulse's strength")
+    h.add_argument("--ffb-speed-full-kn", type=float, default=0.0, help="Full wheel weight from this speed over ground")
+    h.add_argument("--ffb-speed-min-pct", type=float, default=40.0, help="The wheel's weight alongside, of full")
+    h.add_argument("--ffb-alarm-rumble-pct", type=float, default=0.0, help="A rumble for a new unacknowledged alarm")
+    h.add_argument(
+        "--ffb-alarm-min-priority", choices=list(model.ALARM_PRIORITIES), default="warning", help="Rumble from this priority"
+    )
+    h.add_argument("--ffb-lag-resistance-pct", type=float, default=0.0, help="Extra damping while the rudder trails")
     f.add_argument(
         "--settings-file",
         default="auto",
@@ -176,6 +192,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("--ffb-detent-pct must be 0..100")
     if not 0 <= args.ffb_center_mark_pct <= 100:
         p.error("--ffb-center-mark-pct must be 0..100")
+    try:
+        model.apply_config(
+            model.FfbSettings(rudder_max_deg=args.ffb_rudder_max_deg),
+            {k: getattr(args, f"ffb_{k}") for k in HAPTIC_KEYS},
+            gain_cap_pct=model.MAX_GAIN_CEILING_PCT,
+            read_only={},
+        )
+    except ValueError as e:
+        p.error(f"haptics: {e}")
     if not 1 <= args.ffb_spring_boost <= 3:
         p.error("--ffb-spring-boost must be 1..3")
     if not 0 <= args.center_deadband_deg <= model.CONFIG_BOUNDS["center_deadband_deg"][1] or (
@@ -263,6 +288,7 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
             center_mark_pct=args.ffb_center_mark_pct,
             center_deadband_deg=args.center_deadband_deg,
             spring_boost=args.ffb_spring_boost,
+            **{k: getattr(args, f"ffb_{k}") for k in HAPTIC_KEYS},
         )
         settings_path = None
         if args.settings_file == "auto" and not args.fake_device:
@@ -312,8 +338,8 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
         if args.ffb_remote and not remote:
             log.warning("--ffb-remote: %s has no force feedback; serving its (off) settings only", dev.name)
 
-        subscriber = None
-        if remote or (ffb.active and args.ffb == FfbMode.FOLLOW_UP.value):
+        subscribers = []
+        if remote or ffb.active:
             rudder_key = keelson.construct_pubsub_key(
                 args.realm, args.ffb_entity or args.entity_id, "rudder_angle_deg", args.ffb_source
             )
@@ -327,8 +353,32 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                     return
                 ffb.on_rudder(msg.value, time.monotonic())
 
-            subscriber = session.declare_subscriber(rudder_key, on_rudder)
+            subscribers.append(session.declare_subscriber(rudder_key, on_rudder))
             log.info("Follow-up from %s", rudder_key)
+
+            # The speed-sensitive weight and the alarm rumble read the vessel the wheel steers.
+            vessel = args.ffb_entity or args.entity_id
+
+            def on_speed(sample) -> None:
+                try:
+                    _, _, payload = keelson.uncover(sample.payload.to_bytes())
+                    ffb.on_speed(TimestampedFloat.FromString(payload).value, time.monotonic())
+                except Exception as e:
+                    log.warning("Unreadable speed_over_ground_knots on %s: %s", sample.key_expr, e)
+
+            def on_alarm(sample) -> None:
+                try:
+                    _, _, payload = keelson.uncover(sample.payload.to_bytes())
+                    alarm = Alarm.FromString(payload)
+                except Exception as e:
+                    log.warning("Unreadable alarm on %s: %s", sample.key_expr, e)
+                    return
+                ident = alarm.identifier or str(sample.key_expr)
+                ffb.on_alarm(ident, alarm.priority, alarm.acknowledged, time.monotonic())
+
+            for subject, handler in (("speed_over_ground_knots", on_speed), ("alarm", on_alarm)):
+                key = keelson.construct_pubsub_key(args.realm, vessel, subject, "**")
+                subscribers.append(session.declare_subscriber(key, handler))
 
         subjects = list(inputs.subjects)
         if args.ffb_remote:
@@ -409,8 +459,8 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                 for t in threads:
                     t.join(timeout=2.0)
                 ffb.shutdown()
-                if subscriber is not None:
-                    subscriber.undeclare()
+                for sub in subscribers:
+                    sub.undeclare()
     if lost.is_set():
         return EXIT_DEVICE_LOST
     return EXIT_FAILED if failed.is_set() else EXIT_OK

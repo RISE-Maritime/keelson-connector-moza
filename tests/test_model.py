@@ -375,3 +375,51 @@ def test_load_state_clamps_gain_and_drops_what_no_longer_passes():
     assert user == {} and len(notes) == 3
     same, _, notes = model.load_state(["not", "a", "dict"], FfbSettings(), gain_cap_pct=15)
     assert same == FfbSettings() and notes
+
+
+# --- Haptics ----------------------------------------------------------------------------
+
+
+def test_hardover_zone_with_hysteresis():
+    assert model.hardover_side(29.0, None, 30) == 0
+    assert model.hardover_side(30.0, 0, 30) == 1 and model.hardover_reached(0, 1)
+    assert model.hardover_side(28.5, 1, 30) == 1  # held near the line: still in, quiet
+    assert model.hardover_side(27.5, 1, 30) == 0  # 2 deg back inside: out
+    assert model.hardover_side(-31.0, 0, 30) == -1 and model.hardover_reached(0, -1)
+    assert not model.hardover_reached(None, 1) and not model.hardover_reached(1, 0)
+    assert model.hardover_side(35.0, None, 0) == 0  # off
+
+
+def test_speed_weight_never_lighter_on_old_data():
+    s = FfbSettings(speed_full_kn=10, speed_min_pct=40)
+    assert model.speed_weight(s, 0.0, 0.1) == pytest.approx(0.4)
+    assert model.speed_weight(s, 5.0, 0.1) == pytest.approx(0.7)
+    assert model.speed_weight(s, 20.0, 0.1) == 1.0
+    assert model.speed_weight(s, 0.0, model.SPEED_STALE_S + 0.1) == 1.0  # stale: full weight
+    assert model.speed_weight(s, None, None) == 1.0
+    assert model.speed_weight(FfbSettings(), 0.0, 0.1) == 1.0  # off
+
+
+def test_damper_with_lag_resistance():
+    s = FfbSettings(damper_pct=20, lag_resistance_pct=50)
+    assert model.damper_pct_now(s, 1.0, None) == 20  # no fresh rudder: no extra
+    assert model.damper_pct_now(s, 1.0, 2.5) == pytest.approx(45)
+    assert model.damper_pct_now(s, 0.5, -10.0) == pytest.approx(60)
+    assert model.damper_pct_now(FfbSettings(damper_pct=90, lag_resistance_pct=50), 1.0, 9) == 100
+
+
+def test_alarm_rumble_rules_and_schedule():
+    s = FfbSettings(alarm_rumble_pct=60, alarm_min_priority="warning")
+    assert model.alarm_rumbles(s, 3, False) and model.alarm_rumbles(s, 4, False)
+    assert not model.alarm_rumbles(s, 2, False) and not model.alarm_rumbles(s, 4, True)
+    assert not model.alarm_rumbles(FfbSettings(), 4, False)
+    assert model.rumble_due(10.0, 0, 10.0) and not model.rumble_due(10.0, 1, 10.5)
+    assert model.rumble_due(10.0, 1, 11.0) and not model.rumble_due(10.0, 3, 99.0)
+    assert model.RUMBLE_MS < 1000  # inside a lease
+
+
+def test_haptics_config_checks():
+    with pytest.raises(ValueError, match="under rudder_max_deg"):
+        model.apply_config(FfbSettings(rudder_max_deg=30), {"hardover_warn_deg": 30}, gain_cap_pct=30, read_only={})
+    with pytest.raises(ValueError, match="alarm_min_priority"):
+        model.apply_config(FfbSettings(), {"alarm_min_priority": "loud"}, gain_cap_pct=30, read_only={})
