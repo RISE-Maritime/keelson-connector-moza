@@ -39,6 +39,9 @@ class FfbController:
         self._click_id: int | None = None
         self._click_level: int | None = None
         self._notch: int | None = None  # the detent the wheel's rudder order sits in
+        self._center_id: int | None = None
+        self._center_level: int | None = None
+        self._center_side: int | None = None  # -1 port of centre, 0 at it, +1 starboard
         self._wheel_pct: float | None = None
         self._spring: SpringTarget | None = None
         self._started_at: float | None = None
@@ -91,6 +94,7 @@ class FfbController:
                 self._dev.play(self._damper_id, True)
             self._sync_endstop()
             self._sync_click()
+            self._sync_center()
             log.info(
                 "Force feedback %s: gain %.0f%% (ramping over %.1fs), spring %.0f%%, damper %.0f%%, "
                 "full lock at %.0f deg of the base's %.0f, end stop %s",
@@ -161,21 +165,50 @@ class FfbController:
             self._dev.erase(self._click_id)
             self._click_id = self._click_level = None
 
+    def _sync_center(self) -> None:
+        """The centre mark: uploaded while force feedback is on and it is wanted."""
+        if self._started_at is not None and self._s.center_mark_pct > 0:
+            level = model.center_mark_level(self._s)
+            if level != self._center_level:
+                try:
+                    self._center_id = self._dev.upload_click(
+                        -1 if self._center_id is None else self._center_id,
+                        magnitude=level,
+                        period_ms=model.CLICK_PERIOD_MS,
+                        duration_ms=model.CENTER_MARK_MS,
+                    )
+                    self._center_level = level
+                except NotImplementedError as e:
+                    log.warning("No centre mark: %s", e)
+        elif self._center_id is not None:
+            self._dev.play(self._center_id, False)
+            self._dev.erase(self._center_id)
+            self._center_id = self._center_level = None
+
     def on_wheel(self, wheel_pct: float, now: float) -> bool:
-        """The wheel's published position. In ``detent`` mode, a click each time its rudder
-        order passes into another notch. Returns whether it clicked. Raises DeviceGone."""
+        """The wheel's published position. A centre mark each time it reaches centre, and in
+        ``detent`` mode a click each time its rudder order passes into another notch (not
+        both at once: centre wins). Returns whether anything played. Raises DeviceGone."""
         with self._op:
             self._wheel_pct = wheel_pct
-            if self._started_at is None or self._s.mode is not FfbMode.DETENT:
+            side = model.center_side(model.wheel_deg(wheel_pct, self._s), self._center_side)
+            at_center = model.center_reached(self._center_side, side)
+            self._center_side = side
+            if self._started_at is None:
                 return False
-            rudder = model.rudder_order_deg(wheel_pct, self._s)
-            notch = model.detent_notch(rudder, self._notch, self._s.detent_deg)
-            moved = self._notch is not None and notch != self._notch
-            self._notch = notch
-            if moved and self._click_id is not None:
-                self._dev.play(self._click_id, True)
-                return True
-            return False
+            played = False
+            if at_center and self._center_id is not None:
+                self._dev.play(self._center_id, True)
+                played = True
+            if self._s.mode is FfbMode.DETENT:
+                rudder = model.rudder_order_deg(wheel_pct, self._s)
+                notch = model.detent_notch(rudder, self._notch, self._s.detent_deg)
+                moved = self._notch is not None and notch != self._notch
+                self._notch = notch
+                if moved and not played and self._click_id is not None:
+                    self._dev.play(self._click_id, True)
+                    played = True
+            return played
 
     def _set_gain(self, level: int) -> None:
         if level != self._gain:
@@ -258,6 +291,8 @@ class FfbController:
                 old.rudder_max_deg,
             ):
                 self._sync_click()
+            if settings.center_mark_pct != old.center_mark_pct:
+                self._sync_center()
             if settings.damper_pct != old.damper_pct:
                 if settings.damper_pct > 0 and self._damper_id is not None:
                     self._upload_damper(self._damper_id)
@@ -273,7 +308,7 @@ class FfbController:
     def _release(self) -> None:
         """Every effect stopped and erased, the gain at 0. Never raises."""
         self._started_at = None
-        for effect_id in (self._spring_id, self._damper_id, self._endstop_id, self._click_id):
+        for effect_id in (self._spring_id, self._damper_id, self._endstop_id, self._click_id, self._center_id):
             if effect_id is None:
                 continue
             for step in (lambda: self._dev.play(effect_id, False), lambda: self._dev.erase(effect_id)):
@@ -281,7 +316,8 @@ class FfbController:
                     step()
                 except Exception as e:  # the base may already be gone
                     log.debug("FF cleanup of effect %s: %s", effect_id, e)
-        self._spring_id = self._damper_id = self._endstop_id = self._click_id = None
+        self._spring_id = self._damper_id = self._endstop_id = self._click_id = self._center_id = None
+        self._center_level = None
         self._spring_playing = False
         self._click_level = None
         self._notch = None

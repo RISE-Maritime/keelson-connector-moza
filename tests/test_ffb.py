@@ -13,6 +13,11 @@ def fake(ff=True):
     return FakeDevice({"axes": {"ABS_X": [0, 65535, 32767]}, "ff": ff})
 
 
+def effect_ids(dev):
+    """Every effect uploaded: conditions and clicks (the detent click and the centre mark)."""
+    return {e[2] for e in dev.ff_log if e[0] == "upload"} | {e[1] for e in dev.ff_log if e[0] == "click"}
+
+
 def uploads(dev, effect_type):
     return [e for e in dev.ff_log if e[0] == "upload" and e[1] == effect_type]
 
@@ -77,8 +82,7 @@ def test_shutdown_leaves_the_wheel_limp():
     c.start(0.0)
     c.shutdown()
     erased = {e[1] for e in dev.ff_log if e[0] == "erase"}
-    uploaded = {e[2] for e in dev.ff_log if e[0] == "upload"}
-    assert erased == uploaded and erased
+    assert erased == effect_ids(dev) and erased
     assert dev.ff_log[-1] == ("gain", 0)
 
 
@@ -107,7 +111,7 @@ def test_remote_switch_on_ramps_from_zero_and_off_releases():
     assert c.running and gains(dev) == [0]
     c.tick(10.0 + model.GAIN_RAMP_S)
     assert gains(dev)[-1] == model.gain_level(20)
-    ids = {e[2] for e in dev.ff_log if e[0] == "upload"}
+    ids = effect_ids(dev)
     c.update(off, 20.0)
     assert not c.running and c.spring_source == "off"
     assert {e[1] for e in dev.ff_log if e[0] == "erase"} == ids
@@ -244,7 +248,7 @@ def clicks_played(dev, click_id):
 
 def test_detent_mode_clicks_each_step_and_holds_no_spring():
     dev = fake()
-    s = FfbSettings(mode=FfbMode.DETENT, rudder_max_deg=35, detent_deg=5, detent_pct=50)
+    s = FfbSettings(mode=FfbMode.DETENT, rudder_max_deg=35, detent_deg=5, detent_pct=50, center_mark_pct=0)
     c = FfbController(dev, s)
     c.on_wheel(0.0, 0.0)
     c.start(0.0)
@@ -268,7 +272,7 @@ def test_detent_mode_clicks_each_step_and_holds_no_spring():
 
 def test_leaving_detent_mode_brings_the_spring_back():
     dev = fake()
-    s = FfbSettings(mode=FfbMode.CENTER)
+    s = FfbSettings(mode=FfbMode.CENTER, center_mark_pct=0)
     c = FfbController(dev, s)
     c.start(0.0)
     spring_id = uploads(dev, codes.FF_SPRING)[0][2]
@@ -280,3 +284,44 @@ def test_leaving_detent_mode_brings_the_spring_back():
     assert ("erase", click_id) in dev.ff_log
     assert dev.ff_log.count(("play", spring_id, True)) == 2  # playing again
     assert not c.on_wheel(90.0, 2.1)  # no clicks outside detent mode
+
+
+def test_center_mark_in_every_mode_and_released_with_the_rest():
+    for mode in (FfbMode.CENTER, FfbMode.FOLLOW_UP, FfbMode.DETENT):
+        dev = fake()
+        c = FfbController(dev, FfbSettings(mode=mode, wheel_lock_deg=90, center_mark_pct=80, detent_pct=0))
+        c.on_wheel(20.0, 0.0)  # 18 deg of wheel to starboard
+        c.start(0.0)
+        (mark,) = [e for e in dev.ff_log if e[0] == "click" and e[4] == model.CENTER_MARK_MS]
+        mark_id = mark[1]
+        assert mark[2] == model.coeff_level(80)
+        assert c.on_wheel(0.5, 0.1)  # reaches centre
+        assert not c.on_wheel(1.5, 0.2)  # rests by it: no buzz
+        assert not c.on_wheel(10.0, 0.3)  # leaves: nothing
+        assert c.on_wheel(-10.0, 0.4)  # passes straight over it
+        assert dev.ff_log.count(("play", mark_id, True)) == 2, mode
+        c.shutdown()
+        assert ("erase", mark_id) in dev.ff_log
+
+
+def test_center_mark_off_and_on_remotely():
+    dev = fake()
+    s = FfbSettings(mode=FfbMode.CENTER, center_mark_pct=0)
+    c = FfbController(dev, s)
+    c.start(0.0)
+    assert not [e for e in dev.ff_log if e[0] == "click"]
+    c.update(replace(s, center_mark_pct=50), 1.0)
+    (mark,) = [e for e in dev.ff_log if e[0] == "click"]
+    c.update(replace(s, center_mark_pct=0), 2.0)
+    assert ("erase", mark[1]) in dev.ff_log
+
+
+def test_center_mark_wins_over_a_detent_click():
+    dev = fake()
+    c = FfbController(dev, FfbSettings(mode=FfbMode.DETENT, wheel_lock_deg=90, rudder_max_deg=35))
+    c.on_wheel(20.0, 0.0)
+    c.start(0.0)
+    clicks = {e[4]: e[1] for e in dev.ff_log if e[0] == "click"}
+    assert c.on_wheel(0.0, 0.1)  # centre and the 0 deg notch at once: one pulse, the centre's
+    assert dev.ff_log.count(("play", clicks[model.CENTER_MARK_MS], True)) == 1
+    assert dev.ff_log.count(("play", clicks[model.CLICK_DURATION_MS], True)) == 0

@@ -100,6 +100,8 @@ class FfbSettings:
     #: ``detent`` mode: a click each this many degrees of rudder order, this strong.
     detent_deg: float = 5.0
     detent_pct: float = 60.0
+    #: The centre mark: a distinct pulse each time the wheel reaches centre, 0 for none.
+    center_mark_pct: float = 80.0
 
     @property
     def lock_fraction(self) -> float:
@@ -184,6 +186,7 @@ CONFIG_BOUNDS = {
     "endstop_pct": (0.0, 100.0),
     "detent_deg": (0.5, 30.0),
     "detent_pct": (0.0, 100.0),
+    "center_mark_pct": (0.0, 100.0),
 }
 CONFIG_WRITABLE = ("mode", "max_gain_pct", *CONFIG_BOUNDS, "rudder_invert")
 
@@ -203,6 +206,7 @@ def config_of(settings: FfbSettings) -> dict:
         "endstop_pct": settings.endstop_pct,
         "detent_deg": settings.detent_deg,
         "detent_pct": settings.detent_pct,
+        "center_mark_pct": settings.center_mark_pct,
     }
 
 
@@ -469,3 +473,38 @@ def detent_notch(rudder_deg: float, notch: int | None, step_deg: float) -> int:
 def click_level(settings: FfbSettings) -> int:
     """The click's magnitude (s16, 0..0x7FFF)."""
     return coeff_level(settings.detent_pct)
+
+
+# --- The centre mark --------------------------------------------------------------------
+
+#: The wheel is "at centre" within this many degrees of wheel rotation either side, and has
+#: left it only past twice that: a wheel resting on centre must not buzz.
+CENTER_BAND_DEG = 1.0
+#: Twice a detent click's length, so the centre feels different from a notch.
+CENTER_MARK_MS = 60
+
+
+def wheel_deg(wheel_pct: float, settings: FfbSettings) -> float:
+    """The wheel's rotation from centre (deg) for its published position."""
+    return clamp(wheel_pct, -100.0, 100.0) / 100.0 * settings.wheel_lock_deg
+
+
+def center_side(deg: float, side: int | None) -> int:
+    """-1 port of centre, 0 at centre, +1 starboard, with hysteresis: centre is entered
+    within ``CENTER_BAND_DEG`` and left only past twice that."""
+    if abs(deg) <= CENTER_BAND_DEG or (side == 0 and abs(deg) <= 2 * CENTER_BAND_DEG):
+        return 0
+    return 1 if deg > 0 else -1
+
+
+def center_reached(side: int | None, new: int) -> bool:
+    """Mark centre on arriving at it, or on passing straight over it between two readings;
+    never on leaving it, and never for the first reading."""
+    if side is None or new == side:
+        return False
+    return new == 0 or (side != 0 and new == -side)
+
+
+def center_mark_level(settings: FfbSettings) -> int:
+    """The centre mark's magnitude (s16, 0..0x7FFF)."""
+    return coeff_level(settings.center_mark_pct)

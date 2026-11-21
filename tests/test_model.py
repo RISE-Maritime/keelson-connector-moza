@@ -279,3 +279,17 @@ def test_preset_explicit_keys_win_and_round_trips_change_nothing():
 def test_preset_is_shown_while_off():
     s = model.apply_config(FfbSettings(), {"preset": "notched"}, gain_cap_pct=30, read_only={})
     assert model.matching_preset(replace(s, mode=model.FfbMode.OFF)) == "notched"
+
+
+def test_center_mark_on_arriving_or_passing_never_on_leaving():
+    side = model.center_side(5.0, None)
+    assert side == 1 and not model.center_reached(None, side)  # the first reading marks nothing
+    new = model.center_side(0.5, side)
+    assert new == 0 and model.center_reached(side, new)  # arriving at centre
+    assert model.center_side(1.8, 0) == 0  # resting near centre: still at it, no buzz
+    left = model.center_side(2.5, 0)
+    assert left == 1 and not model.center_reached(0, left)  # leaving: nothing
+    assert model.center_reached(1, model.center_side(-30.0, 1))  # straight over centre between readings
+    s = FfbSettings(wheel_lock_deg=90)
+    assert model.wheel_deg(50.0, s) == 45.0
+    assert model.CENTER_MARK_MS == 2 * model.CLICK_DURATION_MS < 1000

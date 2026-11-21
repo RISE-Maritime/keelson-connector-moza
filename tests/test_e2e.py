@@ -26,6 +26,11 @@ REALM, V = "e2e", "testvessel"
 BASE = f"{REALM}/@v0/{V}/pubsub"
 
 
+def effect_ids(ff):
+    """Every effect the base was given: conditions and clicks (detent, centre mark)."""
+    return {e[2] for e in ff if e[0] == "upload"} | {e[1] for e in ff if e[0] == "click"}
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -182,9 +187,8 @@ def test_sigterm_leaves_the_wheel_limp(h):
     h.proc.send_signal(signal.SIGTERM)
     assert h.proc.wait(timeout=10) == 0
     ff = h.ff()
-    uploaded = {e[2] for e in ff if e[0] == "upload"}
     erased = {e[1] for e in ff if e[0] == "erase"}
-    assert uploaded and erased == uploaded
+    assert effect_ids(ff) and erased == effect_ids(ff)
     assert ff[-1] == ("gain", 0)
 
 
@@ -238,7 +242,7 @@ def test_remote_force_feedback_over_configurable(h):
         ok, _ = rpc(h, "set_config", json.dumps({"mode": "off"}).encode())
         assert ok
         ff = h.ff()
-        assert {e[2] for e in ff if e[0] == "upload"} == {e[1] for e in ff if e[0] == "erase"}
+        assert effect_ids(ff) == {e[1] for e in ff if e[0] == "erase"}
         assert ff[-1] == ("gain", 0)
         wait(lambda: len(published) >= 3, what="configuration_json")
         last = json.loads(TimestampedString.FromString(keelson.uncover(published[-1].payload.to_bytes())[2]).value)

@@ -34,6 +34,8 @@ Wiring `wheel_position_pct/moza_r21/wheel` to a vehicle is the consumer's job; f
 | `detent` | No spring: the wheel turns freely and stays where it is left. It gives a short click (`--ffb-detent-pct`) each time its rudder order crosses another `--ffb-detent-deg` (default 5°). The rudder order is the wheel position scaled so full helm lock is `--ffb-rudder-max-deg`. A wheel resting on a boundary doesn't chatter. |
 | `off` | The base's force feedback is left untouched. |
 
+**The centre mark.** In every mode, while force feedback is on, the wheel gives a distinct pulse each time it reaches centre (`--ffb-center-mark-pct`, default 80; 0 for none). It lasts 60 ms, twice a detent click, so centre feels different from a notch. Centre is within 1° of wheel rotation, and is left only past 2°, so a wheel resting there doesn't buzz. Passing straight over centre between two readings also marks it; leaving it doesn't. No preset changes it.
+
 In every mode except `off`, the connector also adds a damper (`--ffb-damper-pct`, 0 to disable) and switches off the base's own autocentre so the two don't fight.
 
 ### Behaviour presets
@@ -81,6 +83,7 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `endstop_pct` | yes | 0 … 100: end-stop stiffness past full helm lock, 0 for none |
 | `detent_deg` | yes | 0.5 … 30: degrees of rudder order between clicks in `detent` mode |
 | `detent_pct` | yes | 0 … 100: click strength in `detent` mode |
+| `center_mark_pct` | yes | 0 … 100: the centre mark's strength, 0 for none |
 | `gain_cap_pct`, `ceiling_pct`, `has_ff`, `backend` | no | the cap, 60, whether the base has force feedback, `hid` / `evdev` |
 | `active`, `spring_source` | no | force feedback on the wheel; `center`, `rudder` or `off` |
 
@@ -210,7 +213,7 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
                     [--base-range-deg BASE_RANGE_DEG]
                     [--wheel-lock-deg WHEEL_LOCK_DEG]
                     [--ffb {off,center,follow-up,detent}]
-                    [--ffb-preset {ship,hydraulic,car,small-boat,notched,free}]
+                    [--ffb-preset {ship,hydraulic,follow-rudder,car,small-boat,notched,free}]
                     [--ffb-max-gain-pct FFB_MAX_GAIN_PCT]
                     [--ffb-spring-pct FFB_SPRING_PCT]
                     [--ffb-damper-pct FFB_DAMPER_PCT]
@@ -219,7 +222,8 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
                     [--ffb-rudder-invert] [--ffb-stale-s FFB_STALE_S]
                     [--ffb-endstop-pct FFB_ENDSTOP_PCT]
                     [--ffb-detent-deg FFB_DETENT_DEG]
-                    [--ffb-detent-pct FFB_DETENT_PCT] [--ffb-remote]
+                    [--ffb-detent-pct FFB_DETENT_PCT]
+                    [--ffb-center-mark-pct FFB_CENTER_MARK_PCT] [--ffb-remote]
 ```
 
 Run `moza2keelson --help` for the full list of options and their defaults.

@@ -337,7 +337,7 @@ def test_controller_through_hid_ramps_and_releases():
     c.shutdown()
     assert h.writes[-1] == bytes([13, 0])
     freed = {w[1] for w in h.writes if w[0] == 11}
-    assert freed == {1, 2}  # damper and spring
+    assert freed == {1, 2, 3}  # damper, centre mark and spring
     dev.close()
 
 

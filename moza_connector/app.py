@@ -112,6 +112,12 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--ffb-detent-deg", type=float, default=5.0, help="detent mode: a click each this much rudder order")
     f.add_argument("--ffb-detent-pct", type=float, default=60.0, help="detent mode: click strength, under the gain")
     f.add_argument(
+        "--ffb-center-mark-pct",
+        type=float,
+        default=80.0,
+        help="A distinct pulse each time the wheel reaches centre, in every mode; 0 for none",
+    )
+    f.add_argument(
         "--ffb-remote",
         action="store_true",
         help="Let configurable/v1 (Crowsnest) switch force feedback and tune it, never above --ffb-max-gain-pct. "
@@ -149,6 +155,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error(f"--ffb-detent-deg must be {lo:g}..{hi:g}")
     if not 0 <= args.ffb_detent_pct <= 100:
         p.error("--ffb-detent-pct must be 0..100")
+    if not 0 <= args.ffb_center_mark_pct <= 100:
+        p.error("--ffb-center-mark-pct must be 0..100")
     return args
 
 
@@ -227,6 +235,7 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
             endstop_pct=args.ffb_endstop_pct,
             detent_deg=args.ffb_detent_deg,
             detent_pct=args.ffb_detent_pct,
+            center_mark_pct=args.ffb_center_mark_pct,
         )
         if args.ffb_preset:
             settings = model.apply_config(
