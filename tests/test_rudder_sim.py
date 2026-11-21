@@ -76,3 +76,51 @@ def test_order_scaling_matches_slipway_helm():
 )
 def test_dead_man(pct, received_at, now, want):
     assert sim.order_for(pct, received_at, now, FERRY) == want
+
+
+# --- Faults for training, and changing hull while it runs ---------------------------------
+
+
+def test_jammed_holds_whatever_is_ordered():
+    assert sim.tick(12.0, -35.0, FERRY, fault="jammed") == 12.0
+
+
+def test_slow_gear_runs_at_a_quarter_rate():
+    angles = run_fault(0.0, 35.0, FERRY, 4.0, "slow")
+    assert angles[-1] == pytest.approx(3.0, abs=0.01)  # 4 s at 0.75 deg/s
+
+
+@pytest.mark.parametrize("fault, end", [("hard_over_port", -35.0), ("hard_over_stbd", 35.0)])
+def test_hard_over_drives_to_the_stop_whatever_the_helm(fault, end):
+    angles = run_fault(0.0, 0.0, FERRY, 15.0, fault)
+    assert angles[-1] == pytest.approx(end, abs=0.05)
+    assert abs(angles[9]) == pytest.approx(3.0, abs=0.01)  # still at the gear's own rate
+
+
+def test_unknown_fault_is_refused():
+    with pytest.raises(ValueError):
+        sim.tick(0.0, 0.0, FERRY, fault="fire")
+
+
+def test_sim_config_hull_travel_rate_and_fault():
+    state = sim.SimState(hull_name="road-ferry-78m", hull=FERRY)
+    usv = sim.apply_sim_config(state, {"hull": "usv-6m"})
+    assert (usv.hull_name, usv.hull) == ("usv-6m", sim.HULLS["usv-6m"])
+    custom = sim.apply_sim_config(usv, {"rudder_rate_degps": 5})
+    assert custom.hull_name == "custom" and custom.hull.rate_degps == 5 and custom.hull.max_deg == 30
+    faulty = sim.apply_sim_config(state, {"fault": "jammed"})
+    assert faulty.fault == "jammed" and faulty.hull == FERRY
+    doc = sim.sim_config(faulty, 4.2)
+    assert sim.apply_sim_config(faulty, doc) == faulty  # a get-edit-set round trip changes nothing
+    for bad in ({"hull": "liner"}, {"fault": "fire"}, {"max_rudder_deg": 0}, {"colour": "red"}):
+        with pytest.raises(ValueError):
+            sim.apply_sim_config(state, bad)
+    assert sim.clamp_to_travel(34.0, sim.HULLS["usv-6m"]) == 30.0
+
+
+def run_fault(delta, order, hull, seconds, fault):
+    out = []
+    for _ in range(round(seconds / sim.TICK_S)):
+        delta = sim.tick(delta, order, hull, fault=fault)
+        out.append(delta)
+    return out

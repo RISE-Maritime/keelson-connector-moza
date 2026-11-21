@@ -165,6 +165,19 @@ The R21 Ultra peaks at 21 Nm, which is enough to injure a wrist.
 
 `--max-rudder-deg` and `--rudder-rate-degps` override the hull.
 
+**From Crowsnest.** The sim serves `configurable/v1` as `rudder_sim`, so its section in the Force feedback test panel can change it while it runs:
+- `hull` (one of the table's), or `max_rudder_deg` / `rudder_rate_degps` by hand (the hull then reads `custom`). A rudder past a shorter travel ends on its stop.
+- `fault`, for training the helmsman's reaction:
+
+  | Fault | The rudder |
+  |---|---|
+  | `none` | follows the order |
+  | `jammed` | holds where it is, whatever is ordered (as Slipway's jammed gear) |
+  | `slow` | follows at a quarter of the gear's rate |
+  | `hard_over_port` / `hard_over_stbd` | runs to that stop at the gear's rate, whatever is ordered |
+
+`get_config` also returns `hulls`, `faults` and the rudder's angle now (`rudder_deg`). The hull and fault are not remembered between runs: the sim always starts healthy.
+
 ```bash
 .venv/bin/moza-rudder-sim --mode client --connect tcp/localhost:7447 -e <vessel_id> --hull road-ferry-78m
 ```

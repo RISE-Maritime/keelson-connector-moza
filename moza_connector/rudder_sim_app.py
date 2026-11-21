@@ -17,7 +17,13 @@ import time
 import keelson
 import zenoh
 from keelson.payloads.Primitives_pb2 import TimestampedFloat
-from keelson.scaffolding import GracefulShutdown, add_common_arguments, create_zenoh_config, setup_logging
+from keelson.scaffolding import (
+    GracefulShutdown,
+    add_common_arguments,
+    create_zenoh_config,
+    make_configurable,
+    setup_logging,
+)
 from keelson.scaffolding.liveliness import declare_liveliness
 from keelson.scaffolding.qos_zenoh import declare_publisher
 
@@ -55,14 +61,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if rate <= 0:
         p.error("--rudder-rate-degps must be positive")
     args.hull_params = sim.Hull(max_deg=max_deg, rate_degps=rate)
+    overridden = args.max_rudder_deg is not None or args.rudder_rate_degps is not None
+    args.hull_name = "custom" if overridden else args.hull
     return args
 
 
 def run(args: argparse.Namespace) -> int:
-    hull: sim.Hull = args.hull_params
     conf = create_zenoh_config(mode=args.mode, connect=args.connect, listen=args.listen, zenoh_config=args.zenoh_config)
     lock = threading.Lock()
     latest: dict = {"pct": None, "at": None}
+    # The hull and any fault, changed from Crowsnest over configurable/v1 while it runs.
+    state = {"sim": sim.SimState(hull_name=args.hull_name, hull=args.hull_params), "delta": 0.0}
 
     with GracefulShutdown() as shutdown, zenoh.open(conf) as session:
         helm_key = keelson.construct_pubsub_key(
@@ -83,20 +92,44 @@ def run(args: argparse.Namespace) -> int:
         pub = declare_publisher(
             session, keelson.construct_pubsub_key(args.realm, args.entity_id, "rudder_angle_deg", args.source_id)
         )
+        def get_config() -> dict:
+            with lock:
+                return sim.sim_config(state["sim"], state["delta"])
+
+        def set_config(patch: dict) -> None:
+            with lock:
+                old = state["sim"]
+                new = sim.apply_sim_config(old, patch)
+                state["sim"] = new
+                state["delta"] = sim.clamp_to_travel(state["delta"], new.hull)
+            if new != old:
+                log.info(
+                    "Now %s: +-%.0f deg at %.1f deg/s%s",
+                    new.hull_name,
+                    new.hull.max_deg,
+                    new.hull.rate_degps,
+                    "" if new.fault == "none" else f", FAULT {new.fault}",
+                )
+
+        make_configurable(session, args.realm, args.entity_id, args.source_id, get_config, set_config)
+        first = args.hull_params
         log.info(
             "Rudder %s: +-%.0f deg at %.1f deg/s, steered by %s; publishing rudder_angle_deg/%s at %.0f Hz",
-            args.hull,
-            hull.max_deg,
-            hull.rate_degps,
+            args.hull_name,
+            first.max_deg,
+            first.rate_degps,
             helm_key,
             args.source_id,
             1 / sim.TICK_S,
         )
 
-        delta = 0.0
         steered = None  # whether the last tick had a live helm, for the log
         with declare_liveliness(
-            session, args.realm, args.entity_id, args.source_id, pubsub_subjects=["rudder_angle_deg"]
+            session,
+            args.realm,
+            args.entity_id,
+            args.source_id,
+            pubsub_subjects=["configuration_json", "rudder_angle_deg"],
         ):
             deadline = time.monotonic()
             while not shutdown.is_requested():
@@ -104,7 +137,8 @@ def run(args: argparse.Namespace) -> int:
                 now = time.monotonic()
                 with lock:
                     pct, at = latest["pct"], latest["at"]
-                order = sim.order_for(pct, at, now, hull)
+                    current = state["sim"]
+                order = sim.order_for(pct, at, now, current.hull)
                 live = pct is not None and at is not None and 0.0 <= now - at <= sim.MAX_INPUT_AGE_S
                 if live != steered:
                     if live:
@@ -112,7 +146,9 @@ def run(args: argparse.Namespace) -> int:
                     elif steered is not None:
                         log.info("No helm for %.0f s: the rudder returns to amidships", sim.MAX_INPUT_AGE_S)
                     steered = live
-                delta = sim.tick(delta, order, hull)
+                with lock:
+                    state["delta"] = sim.tick(state["delta"], order, current.hull, fault=current.fault)
+                    delta = state["delta"]
                 msg = TimestampedFloat()
                 msg.timestamp.FromNanoseconds(time.time_ns())
                 msg.value = delta

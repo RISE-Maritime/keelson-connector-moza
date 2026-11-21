@@ -304,7 +304,23 @@ def test_rudder_sim_follows_the_wheel_and_returns_when_it_goes_silent(h):
         time.sleep(1.0)
         assert 8 <= sum(1 for t, _ in rudder if t >= t0) <= 12  # 10 Hz, like Slipway's tick
 
-        # The wheel goes silent: after 1 s the order is amidships, never the last value.
+        # Jammed from the panel: the rudder holds at 15 deg whatever the wheel orders.
+        key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "set_config", "rudder_sim")
+        wait(lambda: any(r.ok for r in h.session.get(key.replace("set_config", "get_config"), timeout=0.5)),
+             what="the sim's configurable/v1")
+        (reply,) = list(h.session.get(key, payload=json.dumps({"fault": "jammed"}).encode(), timeout=5.0))
+        assert reply.ok is not None
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.0:
+            steer(-100.0)
+            time.sleep(0.1)
+        assert abs(rudder[-1][1] - 15.0) < 0.5
+        (reply,) = list(h.session.get(key, payload=json.dumps({"fault": "none"}).encode(), timeout=5.0))
+        assert reply.ok is not None
+
+        # The wheel goes silent: after 1 s the order is amidships, never the last value. (Wait
+        # the second out first: un-jammed, the rudder swings through 0 on its way to -30.)
+        time.sleep(1.5)
         wait(lambda: abs(rudder[-1][1]) < 0.5, timeout=5.0, what="the rudder back amidships")
     finally:
         proc.terminate()
