@@ -346,14 +346,22 @@ class Preset:
 PRESETS = {
     "ship": Preset(
         "Ship's wheel",
-        "Follow-up: pulled to where the rudder really is, well damped, over the base's full range.",
-        {"mode": "follow-up", "spring_pct": 80.0, "damper_pct": 40.0, "endstop_pct": 100.0,
+        "The wheel steers: it stays where it is put and the rudder follows it; well damped, over the "
+        "base's full range.",
+        {"mode": "detent", "detent_pct": 0.0, "damper_pct": 40.0, "endstop_pct": 100.0,
          "wheel_lock_deg": "full", "rudder_max_deg": 35.0},
     ),
     "hydraulic": Preset(
         "Hydraulic helm",
-        "Follow-up with a heavy, slow wheel: a soft pull to the rudder and a lot of damping.",
-        {"mode": "follow-up", "spring_pct": 40.0, "damper_pct": 80.0, "endstop_pct": 100.0,
+        "The wheel steers, heavy and slow: it stays where it is put, with a lot of damping.",
+        {"mode": "detent", "detent_pct": 0.0, "damper_pct": 80.0, "endstop_pct": 100.0,
+         "wheel_lock_deg": "full", "rudder_max_deg": 35.0},
+    ),
+    "follow-rudder": Preset(
+        "Follow rudder",
+        "Something else steers (an autopilot): the wheel is pulled to where the rudder really is. "
+        "Not while this wheel steers that rudder: the two would hold each other where they are.",
+        {"mode": "follow-up", "spring_pct": 80.0, "damper_pct": 40.0, "endstop_pct": 100.0,
          "wheel_lock_deg": "full", "rudder_max_deg": 35.0},
     ),
     "car": Preset(

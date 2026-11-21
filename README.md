@@ -42,14 +42,17 @@ A preset sets the wheel's whole behaviour in one go: the mode, spring, damper, e
 
 | Preset | Name | Behaviour |
 |---|---|---|
-| `ship` | Ship's wheel | Follow-up: pulled to where the rudder really is, well damped, over the base's full range. |
-| `hydraulic` | Hydraulic helm | Follow-up with a heavy, slow wheel: a soft pull to the rudder and a lot of damping. |
+| `ship` | Ship's wheel | The wheel steers: it stays where it is put and the rudder follows it; well damped, over the base's full range. |
+| `hydraulic` | Hydraulic helm | The wheel steers, heavy and slow: it stays where it is put, with a lot of damping. |
+| `follow-rudder` | Follow rudder | Something else steers (an autopilot): the wheel is pulled to where the rudder really is. Not while this wheel steers that rudder: the two would hold each other where they are. |
 | `car` | Car | A firm centring spring and light damping, 900 degrees lock to lock where the base allows. |
 | `small-boat` | Small boat | Centring and quick: full rudder a quarter turn either side, an end stop past it. |
 | `notched` | Notched | No spring: the wheel stays where it is left and clicks each 5 degrees of rudder. |
 | `free` | Free | No spring and no clicks: the wheel turns freely up to the end stop at full lock. |
 
-The full lock of a preset is pulled in to fit the base: `ship` and `hydraulic` use the base's whole range, and `car` 450° where the base has it.
+**Follow-up is for a rudder something else steers.** If this wheel also steers the rudder it follows (`moza-rudder-sim`, or a vessel mapped to `wheel_position_pct`), the two hold each other: the wheel is pulled to the rudder, which sits where the wheel orders it, so the wheel neither returns nor leads. A wheel that steers uses `ship`, `hydraulic`, `notched` or `free`, which stay where they are put.
+
+The full lock of a preset is pulled in to fit the base: `ship`, `hydraulic` and `follow-rudder` use the base's whole range, and `car` 450° where the base has it.
 
 ### From Crowsnest (`--ffb-remote`)
 
