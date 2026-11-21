@@ -380,6 +380,13 @@ PRESETS = {
         {"mode": "center", "spring_pct": 60.0, "damper_pct": 10.0, "endstop_pct": 100.0,
          "wheel_lock_deg": 90.0, "rudder_max_deg": 30.0},
     ),
+    "jetski": Preset(
+        "Jet ski",
+        "Handlebar steering: a short +-30 degree throw to a firm end stop, a light pull to centre, "
+        "full nozzle (25 degrees) at full lock.",
+        {"mode": "center", "spring_pct": 50.0, "damper_pct": 20.0, "endstop_pct": 100.0,
+         "wheel_lock_deg": 30.0, "rudder_max_deg": 25.0},
+    ),
     "notched": Preset(
         "Notched",
         "No spring: the wheel stays where it is left and clicks each 5 degrees of rudder.",

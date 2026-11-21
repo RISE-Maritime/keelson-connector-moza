@@ -49,10 +49,13 @@ A preset sets the wheel's whole behaviour in one go: the mode, spring, damper, e
 | `follow-rudder` | Follow rudder | Something else steers (an autopilot): the wheel is pulled to where the rudder really is. Not while this wheel steers that rudder: the two would hold each other where they are. |
 | `car` | Car | A firm centring spring and light damping, 900 degrees lock to lock where the base allows. |
 | `small-boat` | Small boat | Centring and quick: full rudder a quarter turn either side, an end stop past it. |
+| `jetski` | Jet ski | Handlebar steering: a short +-30 degree throw to a firm end stop, a light pull to centre, full nozzle (25 degrees) at full lock. |
 | `notched` | Notched | No spring: the wheel stays where it is left and clicks each 5 degrees of rudder. |
 | `free` | Free | No spring and no clicks: the wheel turns freely up to the end stop at full lock. |
 
 **Follow-up is for a rudder something else steers.** If this wheel also steers the rudder it follows (`moza-rudder-sim`, or a vessel mapped to `wheel_position_pct`), the two hold each other: the wheel is pulled to the rudder, which sits where the wheel orders it, so the wheel neither returns nor leads. A wheel that steers uses `ship`, `hydraulic`, `notched` or `free`, which stay where they are put.
+
+A handlebar (`jetski`) or any short lock feels stiffest with a small steering angle set on the base in Pit House (for example 90°), because a spring's pull per degree scales with the base's range.
 
 The full lock of a preset is pulled in to fit the base: `ship`, `hydraulic` and `follow-rudder` use the base's whole range, and `car` 450° where the base has it.
 
