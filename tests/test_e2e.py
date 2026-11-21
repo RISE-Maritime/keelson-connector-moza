@@ -365,3 +365,20 @@ def test_settings_and_saved_behaviours_survive_a_restart(h):
     cfg = json.loads(rpc(h, "get_config")[1])
     assert (cfg["spring_pct"], cfg["max_gain_pct"], cfg["mode"], cfg["active"]) == (33, 12, "off", False)
     assert any(p["name"] == "rivo-bridge" and p["custom"] for p in cfg["presets"])
+
+
+def test_remote_test_pulse_plays_and_saves_nothing(h):
+    path = h.tmp / "settings.json"
+    h.start([], "--ffb-remote", "--ffb-max-gain-pct", "20", "--settings-file", str(path))
+    key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
+    wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
+    ok, err = rpc(h, "set_config", json.dumps({"test": "hardover"}).encode())
+    assert not ok and "choose a mode" in err  # off: nothing to feel
+
+    assert rpc(h, "set_config", json.dumps({"mode": "center", "max_gain_pct": 10}).encode())[0]
+    path.unlink()
+    assert rpc(h, "set_config", json.dumps({"test": "hardover"}).encode())[0]
+    wait(lambda: any(e[0] == "click" and e[4] == model.HARDOVER_MS for e in h.ff()), what="the hard-over pulse")
+    assert not path.exists()  # trying a haptic is not a setting
+    ok, err = rpc(h, "set_config", json.dumps({"test": "center", "spring_pct": 50}).encode())
+    assert not ok and "goes alone" in err

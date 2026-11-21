@@ -245,6 +245,30 @@ class FfbController:
         self._dev.play(current[0], True)
         return True
 
+    def test_pulse(self, name: str, now: float) -> None:
+        """Play one haptic on request (the panel's Test buttons), at its own strength: a
+        click, the centre mark, the hard-over warning, or a whole alarm rumble. Only while
+        force feedback runs, so the gain (and its ramp) still bounds it. A pulse whose
+        feature is off is uploaded for the test and freed at the next settings change or on
+        release; like every pulse it is shorter than a lease and never renewed. Raises
+        ValueError saying why not."""
+        level = model.test_pulse_level(self._s, name)
+        with self._op:
+            if self._closed:
+                raise ValueError("force feedback is shutting down")
+            if self._started_at is None:
+                raise ValueError("force feedback is off: choose a mode first")
+            if name not in self._pulses:
+                self._sync_pulse(name, True, level)
+                if name not in self._pulses:
+                    raise ValueError(f"{self._dev.name} cannot play the {name} pulse")
+            log.info("Test: %s pulse", name)
+            if name == "rumble":
+                self._rumble = (now, 0)
+                self._tick(now)
+            else:
+                self._pulse(name)
+
     # --- The wheel (main thread) ----------------------------------------------------------
 
     def on_wheel(self, wheel_pct: float, now: float) -> bool:

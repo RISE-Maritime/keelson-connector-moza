@@ -423,3 +423,14 @@ def test_haptics_config_checks():
         model.apply_config(FfbSettings(rudder_max_deg=30), {"hardover_warn_deg": 30}, gain_cap_pct=30, read_only={})
     with pytest.raises(ValueError, match="alarm_min_priority"):
         model.apply_config(FfbSettings(), {"alarm_min_priority": "loud"}, gain_cap_pct=30, read_only={})
+
+
+def test_test_pulse_level_is_the_pulses_own_strength():
+    s = FfbSettings(center_mark_pct=80, detent_pct=0, hardover_pct=30, alarm_rumble_pct=60)
+    assert model.test_pulse_level(s, "center") == model.coeff_level(80)
+    assert model.test_pulse_level(s, "hardover") == model.coeff_level(30)
+    assert model.test_pulse_level(s, "rumble") == model.coeff_level(60)
+    with pytest.raises(ValueError, match="Click strength is 0"):
+        model.test_pulse_level(s, "detent")
+    with pytest.raises(ValueError, match="no pulse"):
+        model.test_pulse_level(s, "spring")

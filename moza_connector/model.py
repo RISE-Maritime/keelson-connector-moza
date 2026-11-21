@@ -767,3 +767,27 @@ def alarm_rumbles(settings: FfbSettings, priority: int, acknowledged: bool) -> b
 def rumble_due(started_at: float, played: int, now: float) -> bool:
     """Whether the next pulse of a rumble that started at ``started_at`` is due."""
     return played < RUMBLE_COUNT and now - started_at >= played * RUMBLE_EVERY_S
+
+
+# --- Trying a haptic by hand ---------------------------------------------------------------
+
+#: The pulses the panel can play on request, each with the setting that sets its strength.
+TEST_PULSES = {
+    "center": ("center_mark_pct", "Centre mark"),
+    "detent": ("detent_pct", "Click strength"),
+    "hardover": ("hardover_pct", "Warning strength"),
+    "rumble": ("alarm_rumble_pct", "Alarm rumble"),
+}
+
+
+def test_pulse_level(settings: FfbSettings, name: str) -> int:
+    """The strength (s16) a requested test of pulse ``name`` plays at: its own setting, so
+    the test feels as the real thing will. Raises ValueError for an unknown pulse or one
+    whose strength is 0 (there would be nothing to feel)."""
+    if name not in TEST_PULSES:
+        raise ValueError(f"no pulse {name!r} to test; one of {', '.join(TEST_PULSES)}")
+    key, label = TEST_PULSES[name]
+    level = coeff_level(getattr(settings, key))
+    if level == 0:
+        raise ValueError(f"{label} is 0 %: raise it to feel the test")
+    return level

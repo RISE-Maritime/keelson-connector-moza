@@ -405,6 +405,13 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                 nonlocal user_presets
                 patch = {k: v for k, v in patch.items() if k not in ("active", "spring_source")}
                 save_as, delete = patch.pop("save_preset", None), patch.pop("delete_preset", None)
+                test = patch.pop("test", None)
+                if test is not None:
+                    # Trying a haptic changes no setting, so nothing is saved.
+                    if patch or save_as is not None or delete is not None:
+                        raise ValueError("'test' goes alone, not with settings")
+                    ffb.test_pulse(str(test), time.monotonic())
+                    return
                 new = model.apply_config(
                     ffb.settings, patch, gain_cap_pct=args.ffb_max_gain_pct, read_only=fixed, user_presets=user_presets
                 )

@@ -448,3 +448,48 @@ def test_everything_on_fits_the_bases_ten_effects_and_all_are_released():
     assert len(live) <= 10, live
     c.shutdown()
     assert effect_ids(dev) == {e[1] for e in dev.ff_log if e[0] == "erase"}
+
+
+def test_test_pulse_plays_each_haptic_at_its_own_strength():
+    dev = fake()
+    s = FfbSettings(mode=FfbMode.CENTER, hardover_warn_deg=0, hardover_pct=70, detent_pct=50, alarm_rumble_pct=40)
+    c = FfbController(dev, s)
+    c.start(0.0)
+    assert pulses(dev, model.HARDOVER_MS) == []  # the warning is off: not uploaded ...
+    c.test_pulse("hardover", 1.0)
+    (hardover,) = pulses(dev, model.HARDOVER_MS)  # ... until tested, at its own strength
+    assert hardover[2] == model.coeff_level(70) and ("play", hardover[1], True) in dev.ff_log
+    c.test_pulse("center", 1.1)
+    (center,) = pulses(dev, model.CENTER_MARK_MS)
+    assert dev.ff_log[-1] == ("play", center[1], True)
+    c.test_pulse("detent", 1.2)  # in centre mode, a click only on request
+    (click,) = pulses(dev, model.CLICK_DURATION_MS)
+    assert click[2] == model.coeff_level(50)
+
+    (rumble,) = pulses(dev, model.RUMBLE_MS)
+    c.test_pulse("rumble", 2.0)
+    for t in (2.5, 3.0, 3.5, 4.0, 4.5):
+        c.tick(t)
+    assert dev.ff_log.count(("play", rumble[1], True)) == model.RUMBLE_COUNT
+
+    c.update(replace(s, spring_pct=40), 5.0)  # a settings change frees what is off again
+    assert ("erase", hardover[1]) in dev.ff_log and ("erase", click[1]) in dev.ff_log
+    c.shutdown()
+    assert effect_ids(dev) == {e[1] for e in dev.ff_log if e[0] == "erase"}
+
+
+def test_test_pulse_refuses_when_nothing_could_be_felt():
+    dev = fake()
+    c = FfbController(dev, FfbSettings(mode=FfbMode.CENTER, alarm_rumble_pct=0))
+    with pytest.raises(ValueError, match="choose a mode"):
+        c.test_pulse("center", 0.0)  # not started
+    c.start(0.0)
+    with pytest.raises(ValueError, match="Alarm rumble is 0"):
+        c.test_pulse("rumble", 0.1)
+    with pytest.raises(ValueError, match="no pulse"):
+        c.test_pulse("boom", 0.1)
+    c.shutdown()
+    before = list(dev.ff_log)
+    with pytest.raises(ValueError):
+        c.test_pulse("center", 1.0)
+    assert dev.ff_log == before

@@ -95,6 +95,7 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `presets` | no | every preset's `name`, `label`, `description` and whether it is the operator's own (`custom`) |
 | `save_preset` | action | `"Rivo bridge"`: saves the current behaviour under that name (never the gain) |
 | `delete_preset` | action | a saved behaviour's name; built-ins can't be deleted |
+| `test` | action | `center`, `detent`, `hardover` or `rumble`: plays that haptic once at its own strength, only while a mode runs; sent alone, changes and saves nothing |
 | `max_gain_pct` | yes | 0 … `gain_cap_pct` |
 | `spring_pct`, `damper_pct` | yes | 0 … 100 |
 | `rudder_max_deg` | yes | 1 … 90 |
