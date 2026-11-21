@@ -399,6 +399,11 @@ def test_remote_test_pulse_plays_and_saves_nothing(h):
     assert not ok and "goes alone" in err
 
 
+def base_angle(path):
+    doc = json.loads(path.read_text())
+    return {n: doc[n] for n in ("limit", "max-angle")}
+
+
 def test_hard_stop_sets_the_bases_angle_and_puts_it_back(h, monkeypatch):
     base_file = h.tmp / "base_angle.json"
     monkeypatch.setenv("MOZA_FAKE_BASE_FILE", str(base_file))
@@ -414,7 +419,7 @@ def test_hard_stop_sets_the_bases_angle_and_puts_it_back(h, monkeypatch):
     assert not ok and "read from the base" in err
 
     assert rpc(h, "set_config", json.dumps({"hard_stop": True}).encode())[0]  # small boat: lock 90
-    wait(lambda: json.loads(base_file.read_text()) == {"limit": 90, "max-angle": 90}, what="the base at 180 deg")
+    wait(lambda: base_angle(base_file) == {"limit": 90, "max-angle": 90}, what="the base at 180 deg")
     wait(lambda: json.loads(rpc(h, "get_config")[1])["base_serial"] == "hard stop at ±90°", what="the status")
     cfg = json.loads(rpc(h, "get_config")[1])
     assert (cfg["base_range_deg"], cfg["wheel_lock_deg"]) == (180.0, 90.0)
@@ -422,18 +427,46 @@ def test_hard_stop_sets_the_bases_angle_and_puts_it_back(h, monkeypatch):
 
     h.proc.send_signal(signal.SIGTERM)
     assert h.proc.wait(timeout=10) == 0
-    assert json.loads(base_file.read_text()) == {"limit": 450, "max-angle": 450}  # put back on exit
+    assert base_angle(base_file) == {"limit": 450, "max-angle": 450}  # put back on exit
     assert json.loads(path.read_text())["base_restore"] is None
 
     # A run that dies with the base narrowed: the next start puts it back first.
     h.start([], *args)
-    wait(lambda: json.loads(base_file.read_text()) == {"limit": 90, "max-angle": 90}, what="narrowed again")
+    wait(lambda: base_angle(base_file) == {"limit": 90, "max-angle": 90}, what="narrowed again")
     h.proc.kill()
     h.proc.communicate()
     h.start([], *(a for a in args if a not in ("--ffb-profile", "small-boat")), "--ffb-profile", "ship")
     wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1 after the crash")
     assert rpc(h, "set_config", json.dumps({"hard_stop": False}).encode())[0]
-    wait(lambda: json.loads(base_file.read_text()) == {"limit": 450, "max-angle": 450}, what="put back")
+    wait(lambda: base_angle(base_file) == {"limit": 450, "max-angle": 450}, what="put back")
     h.proc.send_signal(signal.SIGTERM)
     out = h.proc.communicate(timeout=10)[0]
     assert "still narrowed by an earlier run" in out
+
+
+def test_an_alarm_colours_the_rim_until_acknowledged(h, monkeypatch):
+    from keelson.payloads.Alarm_pb2 import Alarm
+
+    base_file = h.tmp / "base_angle.json"
+    monkeypatch.setenv("MOZA_FAKE_BASE_FILE", str(base_file))
+    h.start([], "--ffb-remote", "--ffb-max-gain-pct", "20", "--base-serial", "fake")
+    key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
+    wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
+    assert json.loads(rpc(h, "get_config")[1])["rim_leds"] == "ready"
+    assert rpc(h, "set_config", json.dumps({"alarm_leds": True, "alarm_warning_color": "#ff8800"}).encode())[0]
+    pub = h.session.declare_publisher(f"{BASE}/alarm/test/cpa")
+
+    def alarm(acknowledged):
+        a = Alarm(identifier="cpa-1", priority=Alarm.PRIORITY_WARNING, acknowledged=acknowledged)
+        pub.put(keelson.enclose(a.SerializeToString()))
+
+    colour = lambda: json.loads(base_file.read_text())["rpm-color1"]  # noqa: E731
+    wait(lambda: alarm(False) or colour() == 0xFF8800, what="the rim in the warning's colour")
+    cfg = json.loads(rpc(h, "get_config")[1])
+    assert (cfg["alarm_active"], cfg["rim_leds"]) == ("warning", "showing warning")
+    wait(lambda: alarm(True) or colour() == 0x56F7FC, what="the rim's own colour back")
+    alarm(False)
+    wait(lambda: colour() == 0xFF8800, what="raised again")
+    h.proc.send_signal(signal.SIGTERM)
+    assert h.proc.wait(timeout=10) == 0
+    assert colour() == 0x56F7FC  # put back on exit

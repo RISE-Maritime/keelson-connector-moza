@@ -116,9 +116,17 @@ class FfbSettings:
     #: ``speed_full_kn`` over the ground (0: off).
     speed_full_kn: float = 0.0
     speed_min_pct: float = 40.0
-    #: A rumble for a new, unacknowledged alarm at or above ``alarm_min_priority`` (0: none).
-    alarm_rumble_pct: float = 0.0
-    alarm_min_priority: str = "warning"
+    #: Alarms, per keelson.Alarm priority: a rumble this strong (0: none) for a new,
+    #: unacknowledged alarm (caution once, warning three times, emergency every 2 s while it
+    #: lasts), and, with ``alarm_leds``, the rim's LEDs in that level's colour (emergency
+    #: flashing) while it lasts.
+    alarm_caution_pct: float = 0.0
+    alarm_warning_pct: float = 0.0
+    alarm_emergency_pct: float = 0.0
+    alarm_leds: bool = False
+    alarm_caution_color: str = "#ffd400"
+    alarm_warning_color: str = "#ff7a00"
+    alarm_emergency_color: str = "#ff0000"
     #: Extra damping while the rudder trails the wheel's order (0: none).
     lag_resistance_pct: float = 0.0
     #: The hard end stop: the base's own steering angle set to the helm's lock, over its serial
@@ -243,12 +251,16 @@ CONFIG_BOUNDS = {
     "hardover_pct": (0.0, 100.0),
     "speed_full_kn": (0.0, 60.0),
     "speed_min_pct": (0.0, 100.0),
-    "alarm_rumble_pct": (0.0, 100.0),
+    "alarm_caution_pct": (0.0, 100.0),
+    "alarm_warning_pct": (0.0, 100.0),
+    "alarm_emergency_pct": (0.0, 100.0),
     "lag_resistance_pct": (0.0, 100.0),
 }
 #: keelson.Alarm.Priority values a rumble may start from.
 ALARM_PRIORITIES = {"caution": 2, "warning": 3, "emergency": 4}
-CONFIG_WRITABLE = ("mode", "max_gain_pct", *CONFIG_BOUNDS, "rudder_invert", "alarm_min_priority", "hard_stop")
+ALARM_LEVELS = tuple(ALARM_PRIORITIES)
+ALARM_COLOR_KEYS = tuple(f"alarm_{level}_color" for level in ALARM_LEVELS)
+CONFIG_WRITABLE = ("mode", "max_gain_pct", *CONFIG_BOUNDS, "rudder_invert", "hard_stop", "alarm_leds", *ALARM_COLOR_KEYS)
 
 
 def config_of(settings: FfbSettings) -> dict:
@@ -274,8 +286,13 @@ def config_of(settings: FfbSettings) -> dict:
         "hardover_pct": settings.hardover_pct,
         "speed_full_kn": settings.speed_full_kn,
         "speed_min_pct": settings.speed_min_pct,
-        "alarm_rumble_pct": settings.alarm_rumble_pct,
-        "alarm_min_priority": settings.alarm_min_priority,
+        "alarm_caution_pct": settings.alarm_caution_pct,
+        "alarm_warning_pct": settings.alarm_warning_pct,
+        "alarm_emergency_pct": settings.alarm_emergency_pct,
+        "alarm_leds": settings.alarm_leds,
+        "alarm_caution_color": settings.alarm_caution_color,
+        "alarm_warning_color": settings.alarm_warning_color,
+        "alarm_emergency_color": settings.alarm_emergency_color,
         "lag_resistance_pct": settings.lag_resistance_pct,
     }
 
@@ -306,11 +323,9 @@ def apply_config(
                 changes["mode"] = FfbMode(value)
             except ValueError:
                 raise ValueError(f"mode must be one of {[m.value for m in FfbMode]}, got {value!r}") from None
-        elif key == "alarm_min_priority":
-            if value not in ALARM_PRIORITIES:
-                raise ValueError(f"alarm_min_priority must be one of {list(ALARM_PRIORITIES)}, got {value!r}")
-            changes[key] = value
-        elif key in ("rudder_invert", "hard_stop"):
+        elif key in ALARM_COLOR_KEYS:
+            changes[key] = color_hex(value)
+        elif key in ("rudder_invert", "hard_stop", "alarm_leds"):
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be true or false, got {value!r}")
             changes[key] = value
@@ -511,8 +526,8 @@ def preset_patch(name: str, base_range_deg: float) -> dict:
 BEHAVIOUR_KEYS = (
     "mode", "spring_pct", "spring_boost", "damper_pct", "endstop_pct", "wheel_lock_deg",
     "center_deadband_deg", "rudder_max_deg", "detent_deg", "detent_pct", "center_mark_pct",
-    "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct", "alarm_rumble_pct",
-    "alarm_min_priority", "lag_resistance_pct",
+    "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct", "alarm_caution_pct",
+    "alarm_warning_pct", "alarm_emergency_pct", "alarm_leds", *ALARM_COLOR_KEYS, "lag_resistance_pct",
 )
 #: The wheel's setup: it belongs to this wheel, not to a profile, and is always remembered.
 SETUP_KEYS = ("max_gain_pct", "base_range_deg", "rudder_invert", "stale_s", "hard_stop")
@@ -778,7 +793,7 @@ def load_state(doc, helm: Helm, *, gain_cap_pct: float) -> tuple[Helm, list[str]
     for name, p in (doc.get("presets" if v1 else "profiles") or {}).items():
         try:
             preset_slug(name)
-            kept = {k: v for k, v in dict(p["settings"]).items() if k in BEHAVIOUR_KEYS}
+            kept = {k: v for k, v in upgrade_alarm_keys(dict(p["settings"])).items() if k in BEHAVIOUR_KEYS}
             values = _feel({**defaults, **kept})
             apply_config(FfbSettings(), {k: v for k, v in values.items() if k != "wheel_lock_deg"},
                          gain_cap_pct=MAX_GAIN_CEILING_PCT, read_only={})
@@ -787,7 +802,7 @@ def load_state(doc, helm: Helm, *, gain_cap_pct: float) -> tuple[Helm, list[str]
             notes.append(f"saved profile {name!r} dropped: {e}")
     helm = replace(helm, user=user)
 
-    saved = dict(doc.get("settings" if v1 else "setup") or {})
+    saved = upgrade_alarm_keys(dict(doc.get("settings" if v1 else "setup") or {}))
     setup = {k: v for k, v in saved.items() if k in SETUP_KEYS}
     gain = setup.get("max_gain_pct")
     cap = min(gain_cap_pct, MAX_GAIN_CEILING_PCT)
@@ -945,21 +960,115 @@ def damper_pct_now(settings: FfbSettings, weight: float, lag_deg: float | None) 
     return clamp(settings.damper_pct * weight + extra, 0.0, 100.0)
 
 
-#: The alarm rumble: a quick square for RUMBLE_MS, RUMBLE_COUNT times, RUMBLE_EVERY_S apart.
+# --- Alarms: a rumble and the rim's colour per priority ------------------------------------
+
+#: One rumble: a quick square this long. Each is shorter than a lease and never renewed.
 RUMBLE_PERIOD_MS = 25
 RUMBLE_MS = 400
-RUMBLE_COUNT = 3
-RUMBLE_EVERY_S = 1.0
+#: Per level: how many rumbles (None: for as long as the alarm lasts) and how far apart.
+RUMBLE_PATTERNS = {"caution": (1, 1.0), "warning": (3, 1.0), "emergency": (None, 2.0)}
+#: A Try of an alarm that would rumble for as long as it lasts plays this many.
+TEST_RUMBLES = 3
+#: An alarm not repeated for this long (and not given an expiry) is over.
+ALARM_HOLD_S = 30.0
+#: An emergency's colour flashes: this long on, this long dark.
+FLASH_HALF_S = 0.5
+
+_HEX = set("0123456789abcdef")
 
 
-def alarm_rumbles(settings: FfbSettings, priority: int, acknowledged: bool) -> bool:
-    """A rumble for this alarm: rumble on, not acknowledged, at or above the set priority."""
-    return settings.alarm_rumble_pct > 0 and not acknowledged and priority >= ALARM_PRIORITIES[settings.alarm_min_priority]
+def color_hex(value) -> str:
+    """A colour setting, checked: ``#rrggbb`` in lower case."""
+    if not isinstance(value, str) or len(value) != 7 or value[0] != "#" or not set(value[1:].lower()) <= _HEX:
+        raise ValueError(f"a colour must be #rrggbb, got {value!r}")
+    return value.lower()
 
 
-def rumble_due(started_at: float, played: int, now: float) -> bool:
-    """Whether the next pulse of a rumble that started at ``started_at`` is due."""
-    return played < RUMBLE_COUNT and now - started_at >= played * RUMBLE_EVERY_S
+def color_rgb(value: str) -> int:
+    """``#rrggbb`` as the rim's 3-byte RGB value."""
+    return int(color_hex(value)[1:], 16)
+
+
+def upgrade_alarm_keys(d: dict) -> dict:
+    """Settings from before per-level alarms: one rumble strength from a lowest priority up."""
+    if "alarm_rumble_pct" not in d and "alarm_min_priority" not in d:
+        return d
+    d = dict(d)
+    pct = d.pop("alarm_rumble_pct", 0.0)
+    lowest = ALARM_PRIORITIES.get(d.pop("alarm_min_priority", "warning"), 3)
+    for level, priority in ALARM_PRIORITIES.items():
+        d.setdefault(f"alarm_{level}_pct", pct if priority >= lowest else 0.0)
+    return d
+
+
+def alarm_level(priority: int) -> str | None:
+    """The level of a keelson.Alarm priority (2 caution, 3 warning, 4 emergency), or None."""
+    for level, p in ALARM_PRIORITIES.items():
+        if p == priority:
+            return level
+    return "emergency" if priority > ALARM_PRIORITIES["emergency"] else None
+
+
+def alarm_pct(settings: FfbSettings, level: str) -> float:
+    return getattr(settings, f"alarm_{level}_pct")
+
+
+@dataclass(frozen=True)
+class AlarmSeen:
+    priority: int
+    acknowledged: bool
+    seen_at: float
+    expires_at: float | None = None
+
+
+def alarm_active(a: AlarmSeen, now: float) -> bool:
+    """Unacknowledged, repeated recently enough, and not past its own expiry."""
+    if a.acknowledged or now - a.seen_at > ALARM_HOLD_S:
+        return False
+    return a.expires_at is None or now < a.expires_at
+
+
+def alarm_seen(board: dict, identifier: str, priority: int, acknowledged: bool, now: float,
+               expires_at: float | None = None) -> tuple[dict, bool]:
+    """The alarm board after a reading, and whether it starts something to feel: an alarm not
+    active before (or now at a higher priority) that is active now. Old entries are dropped."""
+    before = board.get(identifier)
+    entry = AlarmSeen(priority, acknowledged, now, expires_at)
+    fresh = alarm_active(entry, now) and (before is None or not alarm_active(before, now) or priority > before.priority)
+    kept = {k: v for k, v in board.items() if now - v.seen_at <= ALARM_HOLD_S and k != identifier}
+    return {**kept, identifier: entry}, fresh
+
+
+def alarm_top(board: dict, now: float) -> int | None:
+    """The highest priority of an active alarm with a level, or None."""
+    active = [a.priority for a in board.values() if alarm_active(a, now) and alarm_level(a.priority)]
+    return max(active) if active else None
+
+
+def rumble_due(level: str, started_at: float, played: int, now: float, limit: int | None = None) -> bool:
+    """Whether the next rumble of a level's pattern, started at ``started_at``, is due.
+    ``limit`` caps a pattern that would go on (a Try)."""
+    count, every = RUMBLE_PATTERNS[level]
+    count = limit if count is None else count
+    if count is not None and played >= count:
+        return False
+    return now - started_at >= played * every
+
+
+def rumble_over(level: str, played: int, limit: int | None = None) -> bool:
+    count = RUMBLE_PATTERNS[level][0]
+    count = limit if count is None else count
+    return count is not None and played >= count
+
+
+def rim_led_state(settings: FfbSettings, top: int | None, now: float) -> tuple[int | None, bool]:
+    """What the rim's LEDs show: an alarm level's colour (RGB) and whether this instant is the
+    dark half of an emergency's flash, or (None, False) for the operator's own colours."""
+    level = alarm_level(top) if top is not None else None
+    if not settings.alarm_leds or level is None:
+        return None, False
+    dark = level == "emergency" and int(now / FLASH_HALF_S) % 2 == 1
+    return color_rgb(getattr(settings, f"alarm_{level}_color")), dark
 
 
 # --- Trying a haptic by hand ---------------------------------------------------------------
@@ -969,7 +1078,9 @@ TEST_PULSES = {
     "center": ("center_mark_pct", "Centre mark"),
     "detent": ("detent_pct", "Click strength"),
     "hardover": ("hardover_pct", "Warning strength"),
-    "rumble": ("alarm_rumble_pct", "Alarm rumble"),
+    "caution": ("alarm_caution_pct", "Caution rumble"),
+    "warning": ("alarm_warning_pct", "Warning rumble"),
+    "emergency": ("alarm_emergency_pct", "Emergency rumble"),
 }
 
 

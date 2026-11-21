@@ -56,8 +56,9 @@ class FfbController:
         self._notch: int | None = None  # the detent the wheel's rudder order sits in
         self._center_side: int | None = None  # -1 port of centre, 0 at it, +1 starboard
         self._hardover_side: int | None = None  # +-1 in a hard-over warning zone, else 0
-        self._rumble: tuple[float, int] | None = None  # (started at, pulses played)
-        self._alarms_felt: set[str] = set()
+        # The rumble playing: (level, started at, rumbles played, limit for a Try or None).
+        self._rumble: tuple[str, float, int, int | None] | None = None
+        self._alarms: dict = {}  # identifier -> model.AlarmSeen
         self._wheel_pct: float | None = None
         self._spring: SpringTarget | None = None
         self._started_at: float | None = None
@@ -97,21 +98,36 @@ class FfbController:
         with self._lock:
             self._sog_kn, self._sog_at = sog_kn, received_at
 
-    def on_alarm(self, identifier: str, priority: int, acknowledged: bool, now: float) -> bool:
-        """An alarm. A new one that should be felt starts a rumble (played by the tick);
-        acknowledged, it may rumble again if it is raised again. Returns whether it starts."""
+    def on_alarm(self, identifier: str, priority: int, acknowledged: bool, now: float,
+                 expires_at: float | None = None) -> bool:
+        """An alarm. A new (or newly higher) unacknowledged one rumbles at its level's strength
+        and pattern, unless a higher level is rumbling; acknowledged, it is over (and may
+        rumble again if raised again). Returns whether a rumble starts."""
         with self._op:
-            if acknowledged:
-                self._alarms_felt.discard(identifier)
+            self._alarms, fresh = model.alarm_seen(self._alarms, identifier, priority, acknowledged, now, expires_at)
+            level = model.alarm_level(priority)
+            if not fresh or level is None or model.alarm_pct(self._s, level) <= 0 or self._started_at is None:
                 return False
-            if not model.alarm_rumbles(self._s, priority, acknowledged) or identifier in self._alarms_felt:
+            if self._rumble is not None and model.ALARM_PRIORITIES[self._rumble[0]] > priority:
                 return False
-            self._alarms_felt.add(identifier)
-            if self._started_at is None or "rumble" not in self._pulses:
+            if not self._start_rumble(level, now):
                 return False
-            self._rumble = (now, 0)
-            log.info("Alarm %s: rumble", identifier)
+            log.info("Alarm %s (%s): rumble", identifier, level)
             return True
+
+    def top_alarm(self, now: float) -> int | None:
+        """The highest priority of an active alarm (for the rim's colour), or None."""
+        with self._op:
+            return model.alarm_top(self._alarms, now)
+
+    def _start_rumble(self, level: str, now: float, limit: int | None = None) -> bool:
+        """Start a level's rumble pattern, the rumble effect re-uploaded at its strength."""
+        self._sync_pulse("rumble", True, model.coeff_level(model.alarm_pct(self._s, level)))
+        if "rumble" not in self._pulses:
+            return False
+        self._rumble = (level, now, 0, limit)
+        self._tick(now)
+        return True
 
     # --- Switching on -------------------------------------------------------------------
 
@@ -228,7 +244,11 @@ class FfbController:
         self._sync_pulse("detent", s.mode is FfbMode.DETENT, model.click_level(s))
         self._sync_pulse("center", True, model.center_mark_level(s))
         self._sync_pulse("hardover", s.hardover_warn_deg > 0, model.coeff_level(s.hardover_pct))
-        self._sync_pulse("rumble", s.alarm_rumble_pct > 0, model.coeff_level(s.alarm_rumble_pct))
+        if self._rumble is not None and model.alarm_pct(s, self._rumble[0]) <= 0:
+            self._rumble = None
+        pcts = [model.alarm_pct(s, level) for level in model.ALARM_LEVELS]
+        playing = model.alarm_pct(s, self._rumble[0]) if self._rumble is not None else max(pcts)
+        self._sync_pulse("rumble", max(pcts) > 0, model.coeff_level(playing))
         if "rumble" not in self._pulses:
             self._rumble = None
         # Count notches and warning zones from where the wheel is now: no pulse for a setting.
@@ -258,14 +278,14 @@ class FfbController:
                 raise ValueError("force feedback is shutting down")
             if self._started_at is None:
                 raise ValueError("force feedback is off: choose a mode first")
-            if name not in self._pulses:
+            if name not in model.ALARM_LEVELS and name not in self._pulses:
                 self._sync_pulse(name, True, level)
                 if name not in self._pulses:
                     raise ValueError(f"{self._dev.name} cannot play the {name} pulse")
-            log.info("Test: %s pulse", name)
-            if name == "rumble":
-                self._rumble = (now, 0)
-                self._tick(now)
+            log.info("Test: %s", name)
+            if name in model.ALARM_LEVELS:
+                if not self._start_rumble(name, now, limit=model.TEST_RUMBLES):
+                    raise ValueError(f"{self._dev.name} cannot play the rumble")
             else:
                 self._pulse(name)
 
@@ -330,11 +350,14 @@ class FfbController:
         self._sync_damper(lag)
 
         if self._rumble is not None:
-            started, played = self._rumble
-            if model.rumble_due(started, played, now):
+            level, started, played, limit = self._rumble
+            emergency = model.ALARM_PRIORITIES["emergency"]
+            if limit is None and level == "emergency" and model.alarm_top(self._alarms, now) != emergency:
+                self._rumble = None  # the emergency is over: acknowledged, expired or no longer repeated
+            elif model.rumble_due(level, started, played, now, limit):
                 self._pulse("rumble")
                 played += 1
-            self._rumble = None if played >= model.RUMBLE_COUNT else (started, played)
+                self._rumble = None if model.rumble_over(level, played, limit) else (level, started, played, limit)
 
         target = model.spring_target(s, now=now, rudder_deg=rudder_deg, rudder_received_at=rudder_at)
         coeff = model.coeff_level(s.spring_pct * self._weight)

@@ -266,8 +266,8 @@ def test_every_builtin_profile_is_complete_valid_and_leaves_the_gain(name):
 
 
 def test_a_builtin_profile_sets_the_haptics_too():
-    h = apply(helm(alarm_rumble_pct=50, hardover_warn_deg=20), {"profile": "ship"})
-    assert (h.settings.alarm_rumble_pct, h.settings.hardover_warn_deg) == (0, 0)
+    h = apply(helm(alarm_warning_pct=50, alarm_leds=True, hardover_warn_deg=20), {"profile": "ship"})
+    assert (h.settings.alarm_warning_pct, h.settings.alarm_leds, h.settings.hardover_warn_deg) == (0, False, 0)
 
 
 def test_profile_lock_fits_a_small_base():
@@ -405,12 +405,13 @@ def test_load_state_clamps_gain_and_drops_what_no_longer_passes():
 
 
 def test_a_version_1_file_keeps_what_was_tuned():
-    doc = {"settings": {"mode": "detent", "max_gain_pct": 12, "spring_pct": 81, "alarm_rumble_pct": 36},
+    doc = {"settings": {"mode": "detent", "max_gain_pct": 12, "spring_pct": 81, "alarm_rumble_pct": 36,
+                        "alarm_min_priority": "caution"},
            "presets": {"rivo-bridge": {"label": "Rivo bridge", "settings": {"damper_pct": 44}}}}
     back, notes = model.load_state(doc, helm(), gain_cap_pct=15)
     assert back.default_profile == model.RESTORED and len(notes) == 1
     restored = model.load_profile(back, model.RESTORED)
-    assert (restored.settings.spring_pct, restored.settings.alarm_rumble_pct) == (81, 36)
+    assert (restored.settings.spring_pct, restored.settings.alarm_caution_pct, restored.settings.alarm_emergency_pct) == (81, 36, 36)
     assert restored.settings.mode is model.FfbMode.CENTER and not restored.enabled  # the command line's mode
     bridge = back.user["rivo-bridge"].settings  # completed from the defaults, its mode never off
     assert set(bridge) == set(model.BEHAVIOUR_KEYS) and bridge["damper_pct"] == 44 and bridge["mode"] != "off"
@@ -450,28 +451,58 @@ def test_damper_with_lag_resistance():
     assert model.damper_pct_now(FfbSettings(damper_pct=90, lag_resistance_pct=50), 1.0, 9) == 100
 
 
-def test_alarm_rumble_rules_and_schedule():
-    s = FfbSettings(alarm_rumble_pct=60, alarm_min_priority="warning")
-    assert model.alarm_rumbles(s, 3, False) and model.alarm_rumbles(s, 4, False)
-    assert not model.alarm_rumbles(s, 2, False) and not model.alarm_rumbles(s, 4, True)
-    assert not model.alarm_rumbles(FfbSettings(), 4, False)
-    assert model.rumble_due(10.0, 0, 10.0) and not model.rumble_due(10.0, 1, 10.5)
-    assert model.rumble_due(10.0, 1, 11.0) and not model.rumble_due(10.0, 3, 99.0)
+def test_alarm_levels_patterns_and_the_board():
+    assert [model.alarm_level(p) for p in (0, 1, 2, 3, 4, 5)] == [None, None, "caution", "warning", "emergency", "emergency"]
+    assert model.rumble_due("caution", 10.0, 0, 10.0) and not model.rumble_due("caution", 10.0, 1, 99.0)
+    assert model.rumble_due("warning", 10.0, 1, 11.0) and not model.rumble_due("warning", 10.0, 1, 10.5)
+    assert model.rumble_due("emergency", 10.0, 50, 110.0)  # goes on while it lasts ...
+    assert not model.rumble_due("emergency", 10.0, 3, 99.0, limit=3)  # ... but a Try stops
     assert model.RUMBLE_MS < 1000  # inside a lease
+    board, fresh = model.alarm_seen({}, "cpa", 3, False, 0.0)
+    assert fresh and model.alarm_top(board, 0.0) == 3
+    board, fresh = model.alarm_seen(board, "cpa", 3, False, 5.0)
+    assert not fresh  # repeated: already felt
+    board, fresh = model.alarm_seen(board, "cpa", 4, False, 6.0)
+    assert fresh  # higher now
+    board, _ = model.alarm_seen(board, "depth", 2, False, 7.0, expires_at=8.0)
+    assert model.alarm_top(board, 7.5) == 4
+    board, _ = model.alarm_seen(board, "cpa", 4, True, 9.0)
+    assert model.alarm_top(board, 9.0) is None  # acknowledged, and the caution expired
+    assert model.alarm_top(model.alarm_seen({}, "x", 2, False, 0.0)[0], model.ALARM_HOLD_S + 1) is None  # not repeated
+
+
+def test_alarm_colours_on_the_rim():
+    s = FfbSettings(alarm_leds=True)
+    assert model.rim_led_state(s, 2, 0.0) == (0xFFD400, False)
+    assert model.rim_led_state(s, 3, 0.0) == (0xFF7A00, False)
+    assert model.rim_led_state(s, 4, 0.1) == (0xFF0000, False)
+    assert model.rim_led_state(s, 4, 0.6) == (0xFF0000, True)  # an emergency flashes
+    assert model.rim_led_state(s, None, 0.0) == (None, False)
+    assert model.rim_led_state(FfbSettings(alarm_leds=False), 4, 0.0) == (None, False)
+    new = model.apply_config(s, {"alarm_caution_color": "#00FF88"}, gain_cap_pct=30, read_only={})
+    assert new.alarm_caution_color == "#00ff88"
+    with pytest.raises(ValueError, match="#rrggbb"):
+        model.apply_config(s, {"alarm_warning_color": "orange"}, gain_cap_pct=30, read_only={})
+
+
+def test_settings_from_before_per_level_alarms_are_upgraded():
+    assert model.upgrade_alarm_keys({"alarm_rumble_pct": 40, "alarm_min_priority": "warning", "spring_pct": 1}) == {
+        "spring_pct": 1, "alarm_caution_pct": 0.0, "alarm_warning_pct": 40, "alarm_emergency_pct": 40}
+    assert model.upgrade_alarm_keys({"spring_pct": 1}) == {"spring_pct": 1}
 
 
 def test_haptics_config_checks():
     with pytest.raises(ValueError, match="under rudder_max_deg"):
         model.apply_config(FfbSettings(rudder_max_deg=30), {"hardover_warn_deg": 30}, gain_cap_pct=30, read_only={})
-    with pytest.raises(ValueError, match="alarm_min_priority"):
-        model.apply_config(FfbSettings(), {"alarm_min_priority": "loud"}, gain_cap_pct=30, read_only={})
+    with pytest.raises(ValueError, match="unknown setting"):
+        model.apply_config(FfbSettings(), {"alarm_min_priority": "warning"}, gain_cap_pct=30, read_only={})
 
 
 def test_test_pulse_level_is_the_pulses_own_strength():
-    s = FfbSettings(center_mark_pct=80, detent_pct=0, hardover_pct=30, alarm_rumble_pct=60)
+    s = FfbSettings(center_mark_pct=80, detent_pct=0, hardover_pct=30, alarm_emergency_pct=60)
     assert model.test_pulse_level(s, "center") == model.coeff_level(80)
     assert model.test_pulse_level(s, "hardover") == model.coeff_level(30)
-    assert model.test_pulse_level(s, "rumble") == model.coeff_level(60)
+    assert model.test_pulse_level(s, "emergency") == model.coeff_level(60)
     with pytest.raises(ValueError, match="Click strength is 0"):
         model.test_pulse_level(s, "detent")
     with pytest.raises(ValueError, match="no pulse"):

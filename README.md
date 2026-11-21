@@ -46,7 +46,7 @@ Wiring `wheel_position_pct/moza_r21/wheel` to a vehicle is the consumer's job; f
 |---|---|---|
 | Hard-over warning | `hardover_warn_deg`, `hardover_pct` | A 45 ms pulse when the rudder order reaches that angle either way, before the end stop. Quiet until the order comes back 2° inside. |
 | Speed-sensitive weight | `speed_full_kn`, `speed_min_pct` | Spring and damper at `speed_min_pct` alongside, rising to full at `speed_full_kn` over the ground (`speed_over_ground_knots` on the vessel's entity). A speed over 2 s old counts as none: full weight, never lighter on old data. |
-| Alarm rumble | `alarm_rumble_pct`, `alarm_min_priority` | Three 400 ms rumbles, a second apart, for each new unacknowledged `alarm` at or above the priority. Once per alarm; acknowledged and raised again, it rumbles again. |
+| Alarms | `alarm_caution_pct`, `alarm_warning_pct`, `alarm_emergency_pct`, `alarm_leds`, `alarm_<level>_color` | Per keelson `alarm` priority, for each new unacknowledged alarm: caution one 400 ms rumble, warning three a second apart, emergency one every 2 s for as long as it lasts (0: no rumble). With `alarm_leds` (needs `--base-serial` and a rim that answers) the rim's RPM and button LEDs take the highest active level's colour (default yellow, orange, red; an emergency flashes) and get their own colours back when it is over. An alarm is over when acknowledged, past its expiry, or not repeated for 30 s. |
 | Gear-lag resistance | `lag_resistance_pct` | Extra damping while the actual rudder trails the order, full once it trails by 5°: turn faster than the steering gear and the wheel resists. No fresh rudder, no extra. |
 
 When the base's effect pool is full, a haptic that can't be loaded is logged and left out; the wheel keeps working.
@@ -125,7 +125,9 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `spring_boost` | yes | 1 … 3: how many times steeper the centring spring is near centre |
 | `hardover_warn_deg`, `hardover_pct` | yes | 0 … under `rudder_max_deg` (0: off); the warning's strength |
 | `speed_full_kn`, `speed_min_pct` | yes | 0 … 60 kn (0: off); the weight alongside, 0 … 100 % |
-| `alarm_rumble_pct`, `alarm_min_priority` | yes | 0 … 100 (0: off); `caution`, `warning` or `emergency` |
+| `alarm_caution_pct`, `alarm_warning_pct`, `alarm_emergency_pct` | yes | 0 … 100 (0: no rumble at that level) |
+| `alarm_leds`, `alarm_caution_color`, `alarm_warning_color`, `alarm_emergency_color` | yes | the rim in the alarm's colour (with `--base-serial`); `#rrggbb` |
+| `rim_leds`, `alarm_active` | no | the rim's state (`off`, `ready`, `showing warning`, `error: …`); the highest active alarm level |
 | `lag_resistance_pct` | yes | 0 … 100 (0: off) |
 | `gain_cap_pct`, `ceiling_pct`, `has_ff`, `backend` | no | the cap, 60, whether the base has force feedback, `hid` / `evdev` |
 | `active`, `spring_source` | no | force feedback on the wheel; `center`, `rudder` or `off` |
@@ -316,8 +318,9 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
                     [--ffb-hardover-pct FFB_HARDOVER_PCT]
                     [--ffb-speed-full-kn FFB_SPEED_FULL_KN]
                     [--ffb-speed-min-pct FFB_SPEED_MIN_PCT]
-                    [--ffb-alarm-rumble-pct FFB_ALARM_RUMBLE_PCT]
-                    [--ffb-alarm-min-priority {caution,warning,emergency}]
+                    [--ffb-alarm-caution-pct FFB_ALARM_CAUTION_PCT]
+                    [--ffb-alarm-warning-pct FFB_ALARM_WARNING_PCT]
+                    [--ffb-alarm-emergency-pct FFB_ALARM_EMERGENCY_PCT]
                     [--ffb-lag-resistance-pct FFB_LAG_RESISTANCE_PCT]
                     [--settings-file SETTINGS_FILE]
                     [--base-serial BASE_SERIAL] [--ffb-remote]

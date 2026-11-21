@@ -24,13 +24,13 @@ def test_a_read_request_is_framed_as_the_base_answers_it():
 
 def test_replies_are_found_among_the_bases_own_frames():
     buf = LOG_FRAME + REPLY_STIFFNESS + LOG_FRAME
-    assert proto.find_reply(buf, proto.READ, "soft-limit-stiffness")[0] == 100
-    assert proto.find_reply(LOG_FRAME + REPLY_LIMIT, proto.READ, "limit")[0] == 450  # 900 deg in Pit House
-    assert proto.find_reply(REPLY_STRENGTH, proto.READ, "soft-limit-strength")[0] == 56
-    assert proto.find_reply(REPLY_LIMIT[:5], proto.READ, "limit") == (None, 0)  # partial: kept
+    assert proto.find_reply(buf, "soft-limit-stiffness")[0] == 100
+    assert proto.find_reply(LOG_FRAME + REPLY_LIMIT, "limit")[0] == 450  # 900 deg in Pit House
+    assert proto.find_reply(REPLY_STRENGTH, "soft-limit-strength")[0] == 56
+    assert proto.find_reply(REPLY_LIMIT[:5], "limit") == (None, 0)  # partial: kept
     bad = REPLY_LIMIT[:-1] + bytes([REPLY_LIMIT[-1] ^ 1])
-    assert proto.find_reply(bad, proto.READ, "limit")[0] is None  # a bad checksum is no reply
-    assert proto.find_reply(REPLY_LIMIT, proto.WRITE, "limit")[0] is None  # the write's reply is A9
+    assert proto.find_reply(bad, "limit")[0] is None  # a bad checksum is no reply
+    assert proto.find_reply(REPLY_LIMIT, "limit", write=True)[0] is None  # the write's reply is A9
 
 
 def test_only_the_steering_angle_may_be_written():
@@ -69,6 +69,10 @@ def test_the_lock_may_widen_past_a_narrowed_base():
         model.apply_config(s, {"wheel_lock_deg": 460}, gain_cap_pct=15, read_only={})
 
 
+def angle(base):
+    return {n: base.values[n] for n in ("limit", "max-angle")}
+
+
 def stop_with(base, pending=None):
     saved = []
     stop = BaseStop(base, saved.append)
@@ -84,9 +88,9 @@ def test_base_stop_narrows_waits_and_restores():
     assert stop.sync(s, 120.0) is None and stop.status.startswith("waiting: turn the wheel within ±85°")
     assert base.writes == []  # never narrower than where the wheel is
     assert stop.sync(s, 3.0) == 180
-    assert base.values == {"limit": 90, "max-angle": 90} and stop.status == "hard stop at ±90°"
+    assert angle(base) == {"limit": 90, "max-angle": 90} and stop.status == "hard stop at ±90°"
     assert saved[-1] == {"limit": 450, "max-angle": 450}  # what to put back after a crash
-    assert stop.restore() and base.values == {"limit": 450, "max-angle": 450} and saved[-1] is None
+    assert stop.restore() and angle(base) == {"limit": 450, "max-angle": 450} and saved[-1] is None
 
 
 def test_restore_never_raises_with_the_base_gone():
@@ -101,5 +105,5 @@ def test_restore_never_raises_with_the_base_gone():
 def test_a_dead_runs_narrowing_is_put_back_at_start():
     base = FakeBaseSerial(90)  # left at 180 deg by a run that died
     stop, saved, own = stop_with(base, {"limit": 450, "max-angle": 450})
-    assert own == 900 and base.values == {"limit": 450, "max-angle": 450} and saved[-1] is None
+    assert own == 900 and angle(base) == {"limit": 450, "max-angle": 450} and saved[-1] is None
     assert valid_restore({"limit": 450}) is None and valid_restore({"limit": 5, "max-angle": 5}) is None

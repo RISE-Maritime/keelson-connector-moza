@@ -1,4 +1,5 @@
-"""The base's serial port: read and write its steering angle (``serial_proto``).
+"""The base's serial port: read and write its steering angle and its rim's LEDs
+(``serial_proto``).
 
 The only module that imports pyserial. A port is used only when its USB vendor id is
 Moza's, so nothing is ever written to an unidentified serial device. Every write is read
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 
 from . import serial_proto as proto
@@ -51,28 +53,33 @@ class BaseSerial:
         self.path = path
         self._port = serial.Serial(path, 115200, timeout=0.05, write_timeout=0.5)
         self._port.reset_input_buffer()
+        self._lock = threading.Lock()  # the hard stop and the rim's LEDs share the port
 
-    def _ask(self, frame: bytes, group: int, name: str) -> int:
-        self._port.write(frame)
-        buf = b""
-        end = time.monotonic() + REPLY_TIMEOUT_S
-        while time.monotonic() < end:
-            buf += self._port.read(256)
-            value, used = proto.find_reply(buf, group, name)
-            if value is not None:
-                return value
-            buf = buf[used:]
-        raise BaseSerialError(f"no reply from the base to {name}")
+    def _ask(self, frame: bytes, name: str, write: bool) -> int:
+        with self._lock:
+            self._port.write(frame)
+            buf = b""
+            end = time.monotonic() + REPLY_TIMEOUT_S
+            while time.monotonic() < end:
+                buf += self._port.read(256)
+                value, used = proto.find_reply(buf, name, write=write)
+                if value is not None:
+                    return value
+                buf = buf[used:]
+        raise BaseSerialError(f"no reply to {name}")
 
     def read(self, name: str) -> int:
-        return self._ask(proto.read_request(name), proto.READ, name)
+        return self._ask(proto.read_request(name), name, False)
 
-    def write(self, name: str, value: int) -> int:
-        """Write, then read it back. Raises BaseSerialError when the base keeps another value."""
-        self._ask(proto.write_request(name, value), proto.WRITE, name)
+    def write(self, name: str, value: int, *, verify: bool = True) -> int:
+        """Write and, with ``verify``, read it back. Raises BaseSerialError when the device
+        keeps another value."""
+        got = self._ask(proto.write_request(name, value), name, True)
+        if not verify:
+            return got
         back = self.read(name)
         if back != value:
-            raise BaseSerialError(f"the base kept {name} = {back}, not {value}")
+            raise BaseSerialError(f"the device kept {name} = {back}, not {value}")
         return back
 
     def close(self) -> None:
@@ -87,14 +94,16 @@ class FakeBaseSerial:
     With ``path`` its angle lives in that JSON file, so a second process (a restart after a
     crash) finds the base as the first left it."""
 
-    def __init__(self, angle: int = 450, path: str | None = None):
+    def __init__(self, angle: int = 450, path: str | None = None, rim: bool = True):
         self.path = "fake"
         self._file = path
         self.values = {"limit": angle, "max-angle": angle}
+        if rim:
+            self.values |= {n: 0x56F7FC for n in proto.RIM_COLORS} | {n: 50 for n in proto.RIM_BRIGHTNESS}
         if path:
             try:
                 with open(path) as f:
-                    self.values = {k: int(v) for k, v in json.load(f).items()}
+                    self.values |= {k: int(v) for k, v in json.load(f).items()}
             except FileNotFoundError:
                 self._save()
         self.writes: list[tuple[str, int]] = []
@@ -108,9 +117,11 @@ class FakeBaseSerial:
     def read(self, name: str) -> int:
         if self.gone:
             raise BaseSerialError("the fake base is gone")
+        if name not in self.values:
+            raise BaseSerialError(f"no reply to {name}")
         return self.values[name]
 
-    def write(self, name: str, value: int) -> int:
+    def write(self, name: str, value: int, *, verify: bool = True) -> int:
         if self.gone:
             raise BaseSerialError("the fake base is gone")
         proto.write_request(name, value)  # the same allow-list as the real port

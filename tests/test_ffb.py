@@ -404,19 +404,48 @@ def test_speed_makes_the_wheel_heavier_and_stale_speed_is_full_weight():
     assert [e for e in uploads(dev, codes.FF_SPRING) if e[6] == 0][-1][4] == model.coeff_level(100)
 
 
-def test_alarm_rumble_three_pulses_once_per_alarm():
+def test_alarm_rumbles_per_level_once_per_alarm():
     dev = fake()
-    c = FfbController(dev, FfbSettings(mode=FfbMode.CENTER, alarm_rumble_pct=60, center_mark_pct=0))
+    s = FfbSettings(mode=FfbMode.CENTER, alarm_caution_pct=20, alarm_warning_pct=50, center_mark_pct=0)
+    c = FfbController(dev, s)
     c.start(0.0)
-    (rumble,) = pulses(dev, model.RUMBLE_MS)
-    assert not c.on_alarm("cpa-1", 2, False, 1.0)  # caution: below "warning"
-    assert c.on_alarm("cpa-1", 3, False, 1.0)
+    (upload,) = pulses(dev, model.RUMBLE_MS)
+    rumble_id = upload[1]
+    plays = lambda: dev.ff_log.count(("play", rumble_id, True))  # noqa: E731
+    assert not c.on_alarm("fire", 4, False, 1.0)  # emergency rumble is 0: nothing
+    assert c.on_alarm("cpa-1", 3, False, 1.0)  # a warning: three, at the warning's strength
+    assert pulses(dev, model.RUMBLE_MS)[-1][2] == model.coeff_level(50)
     assert not c.on_alarm("cpa-1", 3, False, 1.1)  # the same alarm again: felt already
-    for t in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
+    for t in (1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
         c.tick(t)
-    assert dev.ff_log.count(("play", rumble[1], True)) == model.RUMBLE_COUNT
-    c.on_alarm("cpa-1", 3, True, 5.0)  # acknowledged ...
-    assert c.on_alarm("cpa-1", 3, False, 6.0)  # ... and raised again: felt again
+    assert plays() == 3
+    assert c.on_alarm("depth", 2, False, 5.0)  # a caution: one, lighter
+    assert pulses(dev, model.RUMBLE_MS)[-1][2] == model.coeff_level(20)
+    for t in (5.5, 6.0, 7.0):
+        c.tick(t)
+    assert plays() == 4
+    c.on_alarm("cpa-1", 3, True, 8.0)  # acknowledged ...
+    assert c.on_alarm("cpa-1", 3, False, 9.0)  # ... and raised again: felt again
+    assert c.top_alarm(9.0) == 4  # the emergency still counts (for the rim), rumble or not
+    assert c.top_alarm(9.0 + model.ALARM_HOLD_S + 1) is None  # nothing repeated: over
+
+
+def test_an_emergency_rumbles_until_it_is_over():
+    dev = fake()
+    c = FfbController(dev, FfbSettings(mode=FfbMode.CENTER, alarm_emergency_pct=80, center_mark_pct=0))
+    c.start(0.0)
+    rumble_id = pulses(dev, model.RUMBLE_MS)[0][1]
+    plays = lambda: dev.ff_log.count(("play", rumble_id, True))  # noqa: E731
+    assert c.on_alarm("fire", 4, False, 1.0)
+    for t in range(2, 12):
+        c.tick(float(t))
+    assert plays() == 6  # at 1, 3, 5, 7, 9, 11
+    c.on_alarm("fire", 4, True, 11.5)  # acknowledged: over
+    for t in range(12, 20):
+        c.tick(float(t))
+    assert plays() == 6
+    c.shutdown()
+    assert effect_ids(dev) == {e[1] for e in dev.ff_log if e[0] == "erase"}
 
 
 def test_lag_resistance_damps_while_the_rudder_trails():
@@ -440,7 +469,7 @@ def test_lag_resistance_damps_while_the_rudder_trails():
 def test_everything_on_fits_the_bases_ten_effects_and_all_are_released():
     dev = fake()
     s = FfbSettings(mode=FfbMode.DETENT, damper_pct=20, spring_boost=3, wheel_lock_deg=90, hardover_warn_deg=30,
-                    alarm_rumble_pct=50, lag_resistance_pct=20)
+                    alarm_caution_pct=20, alarm_warning_pct=50, alarm_emergency_pct=80, lag_resistance_pct=20)
     c = FfbController(dev, s)
     c.start(0.0)
     c.update(replace(s, mode=FfbMode.CENTER), 1.0)  # springs as well as the clicks of detent mode
@@ -452,7 +481,8 @@ def test_everything_on_fits_the_bases_ten_effects_and_all_are_released():
 
 def test_test_pulse_plays_each_haptic_at_its_own_strength():
     dev = fake()
-    s = FfbSettings(mode=FfbMode.CENTER, hardover_warn_deg=0, hardover_pct=70, detent_pct=50, alarm_rumble_pct=40)
+    s = FfbSettings(mode=FfbMode.CENTER, hardover_warn_deg=0, hardover_pct=70, detent_pct=50, alarm_warning_pct=40,
+                    alarm_emergency_pct=90)
     c = FfbController(dev, s)
     c.start(0.0)
     assert pulses(dev, model.HARDOVER_MS) == []  # the warning is off: not uploaded ...
@@ -466,11 +496,16 @@ def test_test_pulse_plays_each_haptic_at_its_own_strength():
     (click,) = pulses(dev, model.CLICK_DURATION_MS)
     assert click[2] == model.coeff_level(50)
 
-    (rumble,) = pulses(dev, model.RUMBLE_MS)
-    c.test_pulse("rumble", 2.0)
+    rumble_id = pulses(dev, model.RUMBLE_MS)[0][1]
+    c.test_pulse("warning", 2.0)  # the warning's three, at its strength
     for t in (2.5, 3.0, 3.5, 4.0, 4.5):
         c.tick(t)
-    assert dev.ff_log.count(("play", rumble[1], True)) == model.RUMBLE_COUNT
+    assert dev.ff_log.count(("play", rumble_id, True)) == 3
+    assert pulses(dev, model.RUMBLE_MS)[-1][2] == model.coeff_level(40)
+    c.test_pulse("emergency", 10.0)  # would go on while it lasts: a Try plays a few
+    for t in range(11, 20):
+        c.tick(float(t))
+    assert dev.ff_log.count(("play", rumble_id, True)) == 3 + model.TEST_RUMBLES
 
     c.update(replace(s, spring_pct=40), 5.0)  # a settings change frees what is off again
     assert ("erase", hardover[1]) in dev.ff_log and ("erase", click[1]) in dev.ff_log
@@ -480,12 +515,12 @@ def test_test_pulse_plays_each_haptic_at_its_own_strength():
 
 def test_test_pulse_refuses_when_nothing_could_be_felt():
     dev = fake()
-    c = FfbController(dev, FfbSettings(mode=FfbMode.CENTER, alarm_rumble_pct=0))
+    c = FfbController(dev, FfbSettings(mode=FfbMode.CENTER, alarm_caution_pct=0))
     with pytest.raises(ValueError, match="choose a mode"):
         c.test_pulse("center", 0.0)  # not started
     c.start(0.0)
-    with pytest.raises(ValueError, match="Alarm rumble is 0"):
-        c.test_pulse("rumble", 0.1)
+    with pytest.raises(ValueError, match="Caution rumble is 0"):
+        c.test_pulse("caution", 0.1)
     with pytest.raises(ValueError, match="no pulse"):
         c.test_pulse("boom", 0.1)
     c.shutdown()

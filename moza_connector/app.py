@@ -30,6 +30,7 @@ from . import device as devices
 from . import model, profile as profiles, store
 from .base_serial import BaseSerialError, FakeBaseSerial
 from .base_stop import BaseStop
+from .rim_leds import RimLeds
 from .device import DeviceGone, FakeDevice, MozaDevice
 from .ffb import FfbController
 from .inputs import InputPublisher, RateSettings
@@ -45,9 +46,11 @@ EXIT_OK, EXIT_FAILED, EXIT_NO_DEVICE, EXIT_DEVICE_LOST = 0, 1, 2, 3
 #: The haptics' settings, each from --ffb-<key with dashes>.
 HAPTIC_KEYS = (
     "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct",
-    "alarm_rumble_pct", "alarm_min_priority", "lag_resistance_pct",
+    "alarm_caution_pct", "alarm_warning_pct", "alarm_emergency_pct", "lag_resistance_pct",
 )
 FFB_HZ = 20.0
+#: How often the rim's LEDs follow the alarms (an emergency flashes at 1 Hz).
+RIM_HZ = 8.0
 POLL_S = 0.05
 
 
@@ -151,9 +154,10 @@ def parser() -> argparse.ArgumentParser:
     h.add_argument("--ffb-hardover-pct", type=float, default=80.0, help="The hard-over pulse's strength")
     h.add_argument("--ffb-speed-full-kn", type=float, default=0.0, help="Full wheel weight from this speed over ground")
     h.add_argument("--ffb-speed-min-pct", type=float, default=40.0, help="The wheel's weight alongside, of full")
-    h.add_argument("--ffb-alarm-rumble-pct", type=float, default=0.0, help="A rumble for a new unacknowledged alarm")
+    h.add_argument("--ffb-alarm-caution-pct", type=float, default=0.0, help="One rumble for a new caution alarm")
+    h.add_argument("--ffb-alarm-warning-pct", type=float, default=0.0, help="Three rumbles for a new warning alarm")
     h.add_argument(
-        "--ffb-alarm-min-priority", choices=list(model.ALARM_PRIORITIES), default="warning", help="Rumble from this priority"
+        "--ffb-alarm-emergency-pct", type=float, default=0.0, help="A rumble every 2 s while an emergency alarm lasts"
     )
     h.add_argument("--ffb-lag-resistance-pct", type=float, default=0.0, help="Extra damping while the rudder trails")
     f.add_argument(
@@ -286,7 +290,7 @@ def run(args: argparse.Namespace) -> int:
         finally:
             # After force feedback has let go (in _run_with_device): put the base's own
             # steering angle back. Never raises.
-            for stop in stops:
+            for stop in reversed(stops):  # the rim, then the hard stop (which closes the port)
                 stop.restore()
             dev.close()
 
@@ -350,14 +354,20 @@ def _run_with_device(
                 log.info("Settings from %s (%d profiles of yours)", settings_path, len(helm.user))
         # The hard end stop: the base's own steering angle, over its serial port.
         base_restore: dict | None = None
+        rim_restore: dict | None = None
 
         def save() -> None:
             if settings_path is not None:
-                store.write(settings_path, {**model.saved_state(helm), "base_restore": base_restore})
+                store.write(settings_path, {**model.saved_state(helm), "base_restore": base_restore, "rim_restore": rim_restore})
 
         def persist_restore(restore: dict | None) -> None:
             nonlocal base_restore
             base_restore = restore
+            save()
+
+        def persist_rim(restore: dict | None) -> None:
+            nonlocal rim_restore
+            rim_restore = restore
             save()
 
         base_stop = None
@@ -371,6 +381,19 @@ def _run_with_device(
         except (BaseSerialError, OSError, ImportError) as e:
             log.warning("--base-serial %s: %s; no hard end stop", args.base_serial, e)
             base_stop = None
+        # The rim's LEDs, in an alarm's colour: on the same port, when the rim answers.
+        rim = None
+        if base_stop is not None:
+            try:
+                rim = RimLeds(port, persist_rim)
+                rim.start((doc or {}).get("rim_restore"))
+                stops.append(rim)
+                log.info("The rim's LEDs answer: alarm colours available")
+            except (BaseSerialError, OSError) as e:
+                log.info("No rim LEDs over %s (%s): no alarm colours", args.base_serial, e)
+                rim = None
+        if rim is None and helm.settings.alarm_leds:
+            helm = replace(helm, settings=replace(helm.settings, alarm_leds=False))
         if base_stop is None and helm.settings.hard_stop:
             helm = replace(helm, settings=replace(helm.settings, hard_stop=False))
         start_profile = args.ffb_profile or helm.default_profile
@@ -465,7 +488,11 @@ def _run_with_device(
                     log.warning("Unreadable alarm on %s: %s", sample.key_expr, e)
                     return
                 ident = alarm.identifier or str(sample.key_expr)
-                ffb.on_alarm(ident, alarm.priority, alarm.acknowledged, time.monotonic())
+                now = time.monotonic()
+                expires_at = None
+                if alarm.HasField("expiration_time_utc") and alarm.expiration_time_utc.seconds > 0:
+                    expires_at = now + (alarm.expiration_time_utc.ToNanoseconds() - time.time_ns()) / 1e9
+                ffb.on_alarm(ident, alarm.priority, alarm.acknowledged, now, expires_at)
 
             for subject, handler in (("speed_over_ground_knots", on_speed), ("alarm", on_alarm)):
                 key = keelson.construct_pubsub_key(args.realm, vessel, subject, "**")
@@ -487,6 +514,9 @@ def _run_with_device(
                     # With the base's serial port, its angle is read, not set by hand; without
                     # it there is no hard stop to switch on.
                     **({"base_range_deg": helm.settings.base_range_deg} if base_stop is not None else {"hard_stop": False}),
+                    "rim_leds": "off" if rim is None else rim.status,
+                    "alarm_active": model.alarm_level(ffb.top_alarm(time.monotonic()) or 0),
+                    **({} if rim is not None else {"alarm_leds": False}),
                 }
 
             def get_config() -> dict:
@@ -498,7 +528,7 @@ def _run_with_device(
                 nonlocal helm
                 if not isinstance(patch, dict):
                     raise ValueError("set_config expects a JSON object")
-                moving = ("active", "spring_source", "base_serial", "base_angle_deg", "base_range_deg")
+                moving = ("active", "spring_source", "base_serial", "base_angle_deg", "base_range_deg", "rim_leds", "alarm_active")
                 current = read_only()
                 fixed = {k: v for k, v in current.items() if k not in moving}
                 if base_stop is not None and "base_range_deg" in patch and patch["base_range_deg"] != current["base_range_deg"]:
@@ -539,6 +569,10 @@ def _run_with_device(
                     threads.append(_periodic(stop, args.axis_min_hz, inputs.backstop, "axis-backstop", on_thread_error))
                 if ffb.active or remote:
                     threads.append(_periodic(stop, FFB_HZ, ffb.tick, "ffb", on_thread_error))
+                if rim is not None:
+                    threads.append(
+                        _periodic(stop, RIM_HZ, lambda now: rim.sync(helm.settings, ffb.top_alarm(now), now), "rim", on_thread_error)
+                    )
 
                 last_wheel = None
                 while not (shutdown.is_requested() or lost.is_set() or failed.is_set()):
