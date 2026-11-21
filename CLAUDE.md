@@ -10,6 +10,7 @@ A Moza direct-drive wheelbase (R21 Ultra) as a keelson helm (README). It publish
   - Every exit path ends in `FfbController.shutdown()`: effects stopped and erased, gain at 0. It never raises, and it runs even when the base is already gone.
 - **Remote force feedback is opt-in and capped.** Only with `--ffb-remote` does the connector serve `configurable/v1`. It then starts with force feedback off, refuses a gain above `--ffb-max-gain-pct` (never clips it), ramps every gain rise from the current level, applies drops at once, and refuses every change after `shutdown()`.
 - **The simulated rudder is Slipway's.** `rudder_sim.py` mirrors Slipway/DRYDOCK's steering gear. Its constants and equations change only with a cited Slipway or DRYDOCK source, and `tests/test_rudder_sim.py` pins them. It publishes as `rudder_sim`, never as `slipway`.
+- **Saved settings never switch the motor on.** The settings file never restores the mode, and a saved gain above today's cap comes back as the cap.
 - **Stale rudder data is never followed.** Follow-up falls back to plain centring after `--ffb-stale-s`, or when no rudder reading has arrived yet. A rudder timestamp in the future counts as stale.
 - **Silence means stop.** The backstop republishes every axis at `--axis-min-hz` (`vehicle_control/v1`). When the base goes away, publishing stops and the process exits with code 3. It never republishes a last-known value from a device that is gone.
 - **Pure decisions.** `moza_connector/model.py` has no clock, no evdev and no Zenoh, and every decision is tested there.
@@ -38,6 +39,7 @@ A Moza direct-drive wheelbase (R21 Ultra) as a keelson helm (README). It publish
 | `inputs.py` | `InputPublisher`: device events to enveloped payloads through a `put(subject, source, bytes)` callback |
 | `rudder_sim.py` | Slipway's steering gear, mirrored: the rudder order, the rate-limited gear, the dead-man (pure) |
 | `rudder_sim_app.py` | `moza-rudder-sim`: that rudder on the bus, steered by the wheel |
+| `store.py` | The settings file: saved settings and behaviours, read at start, written after each remote change (I/O only; the rules are `model.load_state`) |
 | `app.py` | CLI, Zenoh session, liveliness, rudder subscriber, backstop and force-feedback threads |
 
 ## Commands

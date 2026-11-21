@@ -329,3 +329,23 @@ def test_remote_preset_switches_behaviour(h):
     assert (cfg["preset"], cfg["mode"], cfg["active"], cfg["wheel_lock_deg"]) == ("notched", "detent", True, 90.0)
     wait(lambda: any(e[0] == "click" for e in h.ff()), what="the detent click uploaded")
     assert not any(e[0] == "upload" and e[1] == codes.FF_SPRING and e[6] == 0 for e in h.ff())  # no centring spring
+
+
+def test_settings_and_saved_behaviours_survive_a_restart(h):
+    path = h.tmp / "settings.json"
+    h.start([], "--ffb-remote", "--ffb-max-gain-pct", "20", "--settings-file", str(path))
+    key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
+    wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
+    assert rpc(h, "set_config", json.dumps({"spring_pct": 33, "max_gain_pct": 12}).encode())[0]
+    assert rpc(h, "set_config", json.dumps({"save_preset": "Rivo bridge"}).encode())[0]
+    saved = json.loads(path.read_text())
+    assert saved["settings"]["spring_pct"] == 33 and "mode" not in saved["settings"]
+    assert "rivo-bridge" in saved["presets"]
+
+    h.proc.send_signal(signal.SIGTERM)
+    assert h.proc.wait(timeout=10) == 0
+    h.start([], "--ffb-remote", "--ffb-max-gain-pct", "20", "--settings-file", str(path))
+    wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1 again")
+    cfg = json.loads(rpc(h, "get_config")[1])
+    assert (cfg["spring_pct"], cfg["max_gain_pct"], cfg["mode"], cfg["active"]) == (33, 12, "off", False)
+    assert any(p["name"] == "rivo-bridge" and p["custom"] for p in cfg["presets"])

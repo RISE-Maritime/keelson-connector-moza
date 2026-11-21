@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  A LaunchAgent that keeps one keelson-connector-moza program running on macOS.
+  Filled in by scripts/install-macos-agents.sh; not loaded as it stands.
+
+  KeepAlive/SuccessfulExit=false: launchd starts it again after a failure exit (3 when the
+  base goes away, 1 when a worker fails) but not after a clean stop (0), so "launchctl
+  bootout" and Ctrl-C stay stopped. ThrottleInterval spaces the restarts.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+@ARGS@
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@REPO@</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>3</integer>
+  <key>StandardOutPath</key>
+  <string>@LOG@</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG@</string>
+</dict>
+</plist>

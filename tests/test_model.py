@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 
 import pytest
@@ -325,3 +326,52 @@ def test_apply_config_deadband_and_boost():
         model.apply_config(replace(s, wheel_lock_deg=40), {"center_deadband_deg": 20}, gain_cap_pct=30, read_only={})
     with pytest.raises(ValueError, match="outside"):
         model.apply_config(s, {"spring_boost": 4}, gain_cap_pct=30, read_only={})
+
+
+# --- Remembered settings and the operator's own behaviours ---------------------------------
+
+
+def test_save_and_delete_a_behaviour():
+    s = FfbSettings(mode=model.FfbMode.CENTER, spring_pct=70, wheel_lock_deg=90, max_gain_pct=12)
+    user = model.save_behaviour("Rivo  bridge", s, {})
+    (slug,) = user
+    assert slug == "rivo-bridge" and user[slug].label == "Rivo bridge"
+    assert user[slug].settings["spring_pct"] == 70 and "max_gain_pct" not in user[slug].settings
+    assert model.matching_preset(s, user) == "rivo-bridge"
+    listed = {p["name"]: p["custom"] for p in model.preset_list(user)}
+    assert listed["rivo-bridge"] is True and listed["car"] is False
+    # Applied from elsewhere, it brings the behaviour back but not the gain.
+    other = model.apply_config(FfbSettings(max_gain_pct=5), {"preset": "rivo-bridge"}, gain_cap_pct=30,
+                               read_only={}, user_presets=user)
+    assert (other.spring_pct, other.wheel_lock_deg, other.max_gain_pct) == (70, 90, 5)
+    assert model.delete_behaviour("rivo-bridge", user) == {}
+    with pytest.raises(ValueError, match="built in"):
+        model.delete_behaviour("car", user)
+    with pytest.raises(ValueError, match="built-in"):
+        model.save_behaviour("Car", s, user)
+
+
+def test_saving_while_off_keeps_no_mode():
+    user = model.save_behaviour("quiet", FfbSettings(mode=model.FfbMode.OFF), {})
+    assert "mode" not in user["quiet"].settings
+
+
+def test_saved_state_round_trip_never_restores_the_mode():
+    s = FfbSettings(mode=model.FfbMode.DETENT, spring_pct=33, center_mark_pct=10, max_gain_pct=14)
+    user = model.save_behaviour("mine", s, {})
+    doc = json.loads(json.dumps(model.saved_state(s, user)))
+    back, back_user, notes = model.load_state(doc, FfbSettings(mode=model.FfbMode.OFF), gain_cap_pct=15)
+    assert notes == []
+    assert back.mode is model.FfbMode.OFF
+    assert (back.spring_pct, back.center_mark_pct, back.max_gain_pct) == (33, 10, 14)
+    assert set(back_user) == {"mine"}
+
+
+def test_load_state_clamps_gain_and_drops_what_no_longer_passes():
+    doc = {"settings": {"max_gain_pct": 40, "spring_pct": 50},
+           "presets": {"car": {"label": "x", "settings": {}}, "ok": {"label": "OK", "settings": {"spring_pct": 900}}}}
+    back, user, notes = model.load_state(doc, FfbSettings(), gain_cap_pct=15)
+    assert back.max_gain_pct == 15 and back.spring_pct == 50
+    assert user == {} and len(notes) == 3
+    same, _, notes = model.load_state(["not", "a", "dict"], FfbSettings(), gain_cap_pct=15)
+    assert same == FfbSettings() and notes

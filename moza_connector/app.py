@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import keelson
 import zenoh
@@ -24,7 +25,7 @@ from keelson.scaffolding.liveliness import declare_liveliness
 from keelson.scaffolding.qos_zenoh import declare_publisher
 
 from . import device as devices
-from . import model, profile as profiles
+from . import model, profile as profiles, store
 from .device import DeviceGone, FakeDevice, MozaDevice
 from .ffb import FfbController
 from .inputs import InputPublisher, RateSettings
@@ -128,6 +129,12 @@ def parser() -> argparse.ArgumentParser:
         type=float,
         default=80.0,
         help="A distinct pulse each time the wheel reaches centre, in every mode; 0 for none",
+    )
+    f.add_argument(
+        "--settings-file",
+        default="auto",
+        help="Where the settings and saved behaviours are kept between runs; 'none' keeps nothing. "
+        "auto: the platform's app-settings folder (none with --fake-device)",
     )
     f.add_argument(
         "--ffb-remote",
@@ -257,6 +264,19 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
             center_deadband_deg=args.center_deadband_deg,
             spring_boost=args.ffb_spring_boost,
         )
+        settings_path = None
+        if args.settings_file == "auto" and not args.fake_device:
+            settings_path = store.default_path(args.realm, args.entity_id, args.source_id)
+        elif args.settings_file not in ("auto", "none", ""):
+            settings_path = Path(args.settings_file).expanduser()
+        user_presets: dict = {}
+        if settings_path is not None:
+            doc = store.read(settings_path)
+            if doc is not None:
+                settings, user_presets, notes = model.load_state(doc, settings, gain_cap_pct=args.ffb_max_gain_pct)
+                for note in notes:
+                    log.warning("Settings file %s: %s", settings_path, note)
+                log.info("Settings from %s (%d saved behaviours)", settings_path, len(user_presets))
         if args.ffb_preset:
             settings = model.apply_config(
                 settings, {"preset": args.ffb_preset}, gain_cap_pct=args.ffb_max_gain_pct, read_only={}
@@ -320,24 +340,37 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                     "active": ffb.running,
                     "spring_source": ffb.spring_source,
                     "backend": "fake" if args.fake_device else devices.resolve_backend(args.backend),
-                    "presets": model.preset_list(),
+                    "presets": model.preset_list(user_presets),
                 }
 
             def get_config() -> dict:
-                return {**model.config_of(ffb.settings), "preset": model.matching_preset(ffb.settings), **read_only()}
+                current = ffb.settings
+                return {**model.config_of(current), "preset": model.matching_preset(current, user_presets), **read_only()}
 
             def set_config(patch: dict) -> None:
                 # Read-only keys are compared, not trusted: "active" and "spring_source"
                 # move on their own, so a stale round trip of them is ignored.
                 current = read_only()
                 fixed = {k: v for k, v in current.items() if k not in ("active", "spring_source")}
+                nonlocal user_presets
                 patch = {k: v for k, v in patch.items() if k not in ("active", "spring_source")}
-                new = model.apply_config(ffb.settings, patch, gain_cap_pct=args.ffb_max_gain_pct, read_only=fixed)
+                save_as, delete = patch.pop("save_preset", None), patch.pop("delete_preset", None)
+                new = model.apply_config(
+                    ffb.settings, patch, gain_cap_pct=args.ffb_max_gain_pct, read_only=fixed, user_presets=user_presets
+                )
                 if new.mode is not FfbMode.OFF and not dev.has_ff():
                     raise ValueError(f"{dev.name} has no force feedback")
-                log.info("set_config %s", patch)
+                presets = user_presets
+                if delete is not None:
+                    presets = model.delete_behaviour(delete, presets)
+                if save_as is not None:
+                    presets = model.save_behaviour(save_as, new, presets)
+                log.info("set_config %s%s%s", patch, f" save {save_as!r}" if save_as else "", f" delete {delete!r}" if delete else "")
                 ffb.update(new, time.monotonic())
                 inputs.set_steering(new.lock_fraction, new.deadband_pct, time.monotonic())
+                user_presets = presets
+                if settings_path is not None:
+                    store.write(settings_path, model.saved_state(new, user_presets))
 
             make_configurable(session, args.realm, args.entity_id, args.source_id, get_config, set_config)
             subjects.append("configuration_json")

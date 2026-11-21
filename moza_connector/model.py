@@ -241,7 +241,9 @@ def config_of(settings: FfbSettings) -> dict:
     }
 
 
-def apply_config(settings: FfbSettings, patch: dict, *, gain_cap_pct: float, read_only: dict) -> FfbSettings:
+def apply_config(
+    settings: FfbSettings, patch: dict, *, gain_cap_pct: float, read_only: dict, user_presets: dict | None = None
+) -> FfbSettings:
     """``settings`` with a remote ``set_config`` patch applied, or ValueError.
 
     The patch may be partial. ``max_gain_pct`` may not exceed ``gain_cap_pct`` (the command
@@ -251,7 +253,7 @@ def apply_config(settings: FfbSettings, patch: dict, *, gain_cap_pct: float, rea
     """
     if not isinstance(patch, dict):
         raise ValueError("set_config expects a JSON object")
-    patch = expand_preset(settings, patch)
+    patch = expand_preset(settings, patch, user_presets)
     cap = min(gain_cap_pct, MAX_GAIN_CEILING_PCT)
     changes: dict = {}
     for key, value in patch.items():
@@ -443,12 +445,18 @@ PRESETS = {
 }
 
 
-def preset_patch(name: str, base_range_deg: float) -> dict:
+def all_presets(user: dict | None = None) -> dict:
+    """The built-in presets, then the operator's own (``user``: slug -> Preset)."""
+    return {**PRESETS, **(user or {})}
+
+
+def preset_patch(name: str, base_range_deg: float, user: dict | None = None) -> dict:
     """The set_config patch a preset stands for, on a base of ``base_range_deg``."""
+    presets = all_presets(user)
     try:
-        preset = PRESETS[name]
+        preset = presets[name]
     except KeyError:
-        raise ValueError(f"unknown preset {name!r} (known: {', '.join(PRESETS)})") from None
+        raise ValueError(f"unknown preset {name!r} (known: {', '.join(presets)})") from None
     patch = dict(preset.settings)
     lock = patch.get("wheel_lock_deg")
     if lock is not None:
@@ -456,7 +464,7 @@ def preset_patch(name: str, base_range_deg: float) -> dict:
     return patch
 
 
-def expand_preset(settings: FfbSettings, patch: dict) -> dict:
+def expand_preset(settings: FfbSettings, patch: dict, user: dict | None = None) -> dict:
     """A set_config patch with its ``preset`` (if any) unfolded; the patch's own keys win.
 
     ``"custom"``, or the preset the settings already match, changes nothing: that is a
@@ -466,28 +474,125 @@ def expand_preset(settings: FfbSettings, patch: dict) -> dict:
         return patch
     rest = {k: v for k, v in patch.items() if k != "preset"}
     name = patch["preset"]
-    if name in ("custom", matching_preset(settings)):
+    if name in ("custom", matching_preset(settings, user)):
         return rest
     base = rest.get("base_range_deg", settings.base_range_deg)
-    return {**preset_patch(name, base), **rest}
+    return {**preset_patch(name, base, user), **rest}
 
 
-def matching_preset(settings: FfbSettings) -> str:
+def matching_preset(settings: FfbSettings, user: dict | None = None) -> str:
     """The preset the settings are, or ``"custom"``. With force feedback off its mode is not
     compared, so the panel still shows which behaviour is loaded."""
     current = config_of(settings)
-    for name in PRESETS:
-        patch = preset_patch(name, settings.base_range_deg)
+    for name in all_presets(user):
+        patch = preset_patch(name, settings.base_range_deg, user)
         if settings.mode is FfbMode.OFF:
             patch.pop("mode", None)
-        if all(current[k] == v for k, v in patch.items()):
+        if all(current.get(k) == v for k, v in patch.items()):
             return name
     return "custom"
 
 
-def preset_list() -> list[dict]:
-    """What get_config offers: each preset's name, label and description."""
-    return [{"name": n, "label": p.label, "description": p.description} for n, p in PRESETS.items()]
+def preset_list(user: dict | None = None) -> list[dict]:
+    """What get_config offers: each preset's name, label and description; the operator's
+    own marked ``custom``."""
+    return [
+        {"name": n, "label": p.label, "description": p.description, "custom": n not in PRESETS}
+        for n, p in all_presets(user).items()
+    ]
+
+
+# --- The operator's own behaviours, and what is remembered between runs ----------------
+
+#: What a saved behaviour keeps: how the wheel behaves, not the gain (the operator's
+#: strength, under the cap), the base's range or the rudder feed's details.
+BEHAVIOUR_KEYS = (
+    "mode", "spring_pct", "spring_boost", "damper_pct", "endstop_pct", "wheel_lock_deg",
+    "center_deadband_deg", "rudder_max_deg", "detent_deg", "detent_pct", "center_mark_pct",
+)
+
+
+def preset_slug(name: str) -> str:
+    """A behaviour's name as its key: lower case, words joined by dashes."""
+    slug = "-".join("".join(c if c.isalnum() else " " for c in str(name).lower()).split())
+    if not slug or len(slug) > 40:
+        raise ValueError("a behaviour's name must have 1..40 letters or digits")
+    if slug in PRESETS or slug == "custom":
+        raise ValueError(f"{name!r} is a built-in behaviour's name")
+    return slug
+
+
+def describe_behaviour(settings: dict) -> str:
+    """A one-line summary of a saved behaviour, for its tooltip."""
+    mode = {"center": "Centre", "follow-up": "Follow-up", "detent": "Free"}.get(settings.get("mode"), "Mode unchanged")
+    parts = [mode]
+    if settings.get("mode") in ("center", "follow-up"):
+        parts.append(f"spring {settings.get('spring_pct', 0):g} %")
+    parts += [f"damper {settings.get('damper_pct', 0):g} %", f"full lock {settings.get('wheel_lock_deg', 0):g} deg"]
+    if settings.get("mode") == "detent" and settings.get("detent_pct"):
+        parts.append(f"a click each {settings.get('detent_deg', 0):g} deg")
+    return "Saved: " + ", ".join(parts) + "."
+
+
+def save_behaviour(name: str, settings: FfbSettings, user: dict | None) -> dict:
+    """The operator's presets with the current behaviour saved as ``name``. With force
+    feedback off its mode is not kept, so choosing it later does not switch the wheel on."""
+    slug = preset_slug(name)
+    current = config_of(settings)
+    kept = {k: current[k] for k in BEHAVIOUR_KEYS if k in current}
+    if settings.mode is FfbMode.OFF:
+        kept.pop("mode")
+    label = " ".join(str(name).split())[:40]
+    return {**(user or {}), slug: Preset(label, describe_behaviour(kept), kept)}
+
+
+def delete_behaviour(name: str, user: dict | None) -> dict:
+    """The operator's presets without ``name``. A built-in cannot be deleted."""
+    if name in PRESETS:
+        raise ValueError(f"{name!r} is built in and cannot be deleted")
+    if name not in (user or {}):
+        raise ValueError(f"no saved behaviour {name!r}")
+    return {k: v for k, v in user.items() if k != name}
+
+
+def saved_state(settings: FfbSettings, user: dict | None) -> dict:
+    """What is written to the settings file: every writable setting but the mode (force
+    feedback always starts off), and the operator's behaviours."""
+    kept = {k: v for k, v in config_of(settings).items() if k != "mode"}
+    presets = {n: {"label": p.label, "description": p.description, "settings": p.settings} for n, p in (user or {}).items()}
+    return {"settings": kept, "presets": presets}
+
+
+def load_state(doc, settings: FfbSettings, *, gain_cap_pct: float) -> tuple[FfbSettings, dict, list[str]]:
+    """Settings and behaviours from a settings file, or the given settings and a reason.
+
+    The mode is never restored. A saved gain above today's cap comes back as the cap. A
+    setting or behaviour that no longer passes the checks is dropped, and said why.
+    """
+    notes: list[str] = []
+    if not isinstance(doc, dict):
+        return settings, {}, ["the settings file is not a JSON object: ignored"]
+    user: dict = {}
+    for name, p in (doc.get("presets") or {}).items():
+        try:
+            preset_slug(name)
+            kept = {k: v for k, v in dict(p["settings"]).items() if k in BEHAVIOUR_KEYS}
+            apply_config(FfbSettings(), {k: v for k, v in kept.items() if k != "wheel_lock_deg"},
+                         gain_cap_pct=MAX_GAIN_CEILING_PCT, read_only={})
+            user[name] = Preset(str(p["label"])[:40], str(p.get("description", "")), kept)
+        except (ValueError, KeyError, TypeError) as e:
+            notes.append(f"saved behaviour {name!r} dropped: {e}")
+    saved = {k: v for k, v in dict(doc.get("settings") or {}).items() if k != "mode"}
+    gain = saved.get("max_gain_pct")
+    cap = min(gain_cap_pct, MAX_GAIN_CEILING_PCT)
+    if isinstance(gain, (int, float)) and not isinstance(gain, bool) and gain > cap:
+        saved["max_gain_pct"] = cap
+        notes.append(f"saved gain {gain:g} % is above today's cap: {cap:g} %")
+    try:
+        settings = apply_config(settings, saved, gain_cap_pct=gain_cap_pct, read_only={}, user_presets=user)
+    except ValueError as e:
+        notes.append(f"saved settings ignored: {e}")
+    return settings, user, notes
 
 
 # --- Detents (``detent`` mode) ----------------------------------------------------------

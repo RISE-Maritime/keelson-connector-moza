@@ -81,7 +81,9 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 |---|---|---|
 | `mode` | yes | `off`, `center`, `follow-up`, `detent` |
 | `preset` | yes | a preset's name, applied at once; reads back as the matching preset or `custom` |
-| `presets` | no | every preset's `name`, `label` and `description` |
+| `presets` | no | every preset's `name`, `label`, `description` and whether it is the operator's own (`custom`) |
+| `save_preset` | action | `"Rivo bridge"`: saves the current behaviour under that name (never the gain) |
+| `delete_preset` | action | a saved behaviour's name; built-ins can't be deleted |
 | `max_gain_pct` | yes | 0 … `gain_cap_pct` |
 | `spring_pct`, `damper_pct` | yes | 0 … 100 |
 | `rudder_max_deg` | yes | 1 … 90 |
@@ -99,6 +101,12 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `active`, `spring_source` | no | force feedback on the wheel; `center`, `rudder` or `off` |
 
 Every change is republished on `configuration_json/moza_r21`.
+
+**Remembered between runs.** Every change made remotely is saved to a settings file, together with the behaviours the operator has saved, and read back at start-up. The default is `~/Library/Application Support/moza2keelson/<realm>-<entity>-<source>.json` on macOS and `~/.config/moza2keelson/` elsewhere; `--settings-file PATH` moves it, `--settings-file none` keeps nothing.
+- The mode is never restored: force feedback still starts off.
+- A saved gain above today's `--ffb-max-gain-pct` comes back as the cap.
+- A saved value that no longer passes the checks is dropped and logged; the rest still loads.
+- An explicit `--ffb-preset` is applied on top of the saved settings.
 
 ```bash
 .venv/bin/moza2keelson -e <vessel_id> -p r21-ultra-no-pedals --ffb-remote --ffb-max-gain-pct 15
@@ -188,6 +196,18 @@ uv sync --locked
 .venv/bin/moza2keelson -e <vessel_id> -p r21-ultra-no-pedals --ffb center --ffb-max-gain-pct 10 # 2. gentle centring
 ```
 
+### Keep it running on macOS
+
+The connector exits when the base drops off USB (code 3), by design. On Linux the container's restart policy brings it back; on macOS a LaunchAgent does:
+
+```bash
+scripts/install-macos-agents.sh -e <vessel_id> --with-sim     # connector (--ffb-remote, no pedals) and the rudder sim
+scripts/install-macos-agents.sh -e <vessel_id> -- -p r21-ultra --ffb-remote --ffb-max-gain-pct 20   # your own flags
+scripts/install-macos-agents.sh --uninstall
+```
+
+launchd restarts a program that fails (exit 3 or 1) after 3 s, but not one stopped cleanly. Logs go to `~/Library/Logs/moza2keelson.log` and `~/Library/Logs/moza-rudder-sim.log`.
+
 ## Running
 
 The example below uses Docker on a Linux host. Edit `<vessel_id>` in [`docker-compose.moza.yml`](docker-compose.moza.yml) first.
@@ -236,7 +256,8 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
                     [--ffb-detent-deg FFB_DETENT_DEG]
                     [--ffb-detent-pct FFB_DETENT_PCT]
                     [--ffb-spring-boost FFB_SPRING_BOOST]
-                    [--ffb-center-mark-pct FFB_CENTER_MARK_PCT] [--ffb-remote]
+                    [--ffb-center-mark-pct FFB_CENTER_MARK_PCT]
+                    [--settings-file SETTINGS_FILE] [--ffb-remote]
 ```
 
 Run `moza2keelson --help` for the full list of options and their defaults.
