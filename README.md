@@ -107,6 +107,8 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `save_profile` | action | `true`: saves the changes into the selected profile; yours only, not a built-in |
 | `save_profile_as` | action | `"Rivo bridge"`: a new profile of yours from the current values, then selected |
 | `delete_profile` | action | one of your profiles; the selected or default one falls back to `ship` |
+| `hard_stop` | yes (with `--base-serial`) | `true` / `false`: the base's own steering angle set to the helm's lock |
+| `base_serial`, `base_angle_deg`, `base_max_deg` | no | the hard stop's state (`off`, `base at 900°`, `hard stop at ±90°`, `waiting: …`, `error: …`); the base's angle now and its own |
 | `test` | action | `center`, `detent`, `hardover` or `rumble`: plays that haptic once at its own strength, only while a mode runs; sent alone, changes and saves nothing |
 | `max_gain_pct` | yes | 0 … `gain_cap_pct` |
 | `spring_pct`, `damper_pct` | yes | 0 … 100 |
@@ -148,6 +150,18 @@ By default, ±100 % on `wheel_position_pct` is the base's own end, which on a si
 - **An end stop** (`--ffb-endstop-pct`, default 100) pushes back past it, harder the further you turn: a stiff spring whose dead band is as wide as full helm lock. It is under the overall gain like every other effect, so its strength follows the gain slider. It works only while force feedback is on.
 - **The base's own range** must be given as `--base-range-deg` (default 900), the steering angle set in Pit House or Boxflat, lock to lock. The USB reports don't say it. To check it: set a lock of 90° and turn the wheel exactly a quarter turn. `wheel_position_pct` should read ±100. If it reads ±50, the base range is twice what you entered.
 - **Moving the lock remotely** while force feedback is on fades the force in again from 0 over 2 s, since the wheel may suddenly be past the new stop. The wheel position jumps to the new scale at once: don't change it while the helm is steering a vessel.
+
+### The hard end stop (`--base-serial`)
+
+The software end stop is a spring: its pull grows with how far past lock the wheel goes, measured against the base's whole range, and it is scaled by the gain cap. At 15 % gain on a 900° base it is soft. The base's own steering-angle stop is far firmer and not limited by the gain, so with `--base-serial auto` the connector can move it to full helm lock:
+
+- **Switch it on** with `hard_stop` (Crowsnest's Wheel setup). The base's steering angle becomes twice the helm's lock (at least 90°), so its own stop sits at full lock. It follows every lock change, including a profile switch.
+- **Never narrower than the wheel:** a narrower angle is set only while the wheel is at least 5° inside it; until then `base_serial` says "waiting: turn the wheel within ±X°" and the software stop holds. Wider is set at once.
+- **Put back on exit:** the angle read at start (Pit House's) is put back on every exit. If the process dies, the next start puts it back first (the settings file keeps `base_restore`).
+- **The base's range is read, not typed:** `base_range_deg` follows the base and can't be set by hand. `base_max_deg` is the base's own angle.
+- **Only the steering angle is ever written** (`limit`, `max-angle`), never the torque or the FFB strength. The port is used only when its USB vendor id is Moza's. Quit Pit House first.
+
+The serial framing was written from Boxflat's protocol notes (no code copied) and checked against an R21 Ultra.
 
 The rudder is assumed to report **positive to starboard**, the same as `wheel_position_pct`. If yours reports positive to port, pass `--ffb-rudder-invert`.
 
@@ -305,7 +319,8 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
                     [--ffb-alarm-rumble-pct FFB_ALARM_RUMBLE_PCT]
                     [--ffb-alarm-min-priority {caution,warning,emergency}]
                     [--ffb-lag-resistance-pct FFB_LAG_RESISTANCE_PCT]
-                    [--settings-file SETTINGS_FILE] [--ffb-remote]
+                    [--settings-file SETTINGS_FILE]
+                    [--base-serial BASE_SERIAL] [--ffb-remote]
 ```
 
 Run `moza2keelson --help` for the full list of options and their defaults.

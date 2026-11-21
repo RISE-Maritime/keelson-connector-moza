@@ -14,17 +14,22 @@ A Moza direct-drive wheelbase (R21 Ultra) as a keelson helm (README). It publish
 - **Stale rudder data is never followed.** Follow-up falls back to plain centring after `--ffb-stale-s`, or when no rudder reading has arrived yet. A rudder timestamp in the future counts as stale.
 - **Silence means stop.** The backstop republishes every axis at `--axis-min-hz` (`vehicle_control/v1`). When the base goes away, publishing stops and the process exits with code 3. It never republishes a last-known value from a device that is gone.
 - **Pure decisions.** `moza_connector/model.py` has no clock, no evdev and no Zenoh, and every decision is tested there.
-- **evdev and hidapi stay at the edge.** Only `EvdevDevice` and `device.find()` import evdev, and only on Linux. Only `hid_device.open_hid()` and `find_hid()` import hidapi. Everything else must import on both platforms. `codes.py` spells out the event codes, and `EvdevDevice` checks them against `evdev.ecodes`.
+- **evdev, hidapi and pyserial stay at the edge.** Only `EvdevDevice` and `device.find()` import evdev, and only on Linux. Only `hid_device.open_hid()` and `find_hid()` import hidapi. Only `base_serial` imports pyserial. Everything else must import on both platforms. `codes.py` spells out the event codes, and `EvdevDevice` checks them against `evdev.ecodes`.
 - **HID reports are found by usage.** `HidDevice` never writes to a hard-coded report id or offset; it looks each field up in the base's own descriptor (`hid_report.py`), and an out-of-range value raises instead of being clipped.
 - **HID effects are leased.** macOS doesn't erase a dead process's effects, so every HID effect has a finite duration (`EFFECT_LEASE_MS`) and is renewed while it plays. Never make one infinite. A click (`upload_click`) is the exception to renewal: it is never renewed, and its own duration may not exceed a lease.
-- **The fake device is for the tests only.** `--fake-device` is refused unless `MOZA_CONNECTOR_TESTING=1`.
+- **The base's own steering angle (the hard stop) is opt-in, narrow-only-when-safe and always put back.**
+  - Only with `--base-serial`, and only to a port whose USB vendor id is Moza's (0x346E).
+  - `serial_proto.WRITABLE` is the whole allow-list: the steering angle (`limit`, `max-angle`). Never the torque, the FFB strength, `ffb-disable` or the soft-limit strength: the gain ceiling stays the only strength control.
+  - A narrower angle is written only while the wheel is inside it by `BASE_WHEEL_MARGIN_DEG`; wider at once. Never under `BASE_MIN_RANGE_DEG`, never wider than the angle read at start.
+  - The angle read at start is put back on every exit (`BaseStop.restore()`, after `FfbController.shutdown()`, never raises). What to put back is saved (`base_restore`) before narrowing, so the next start undoes a crash first.
+- **The fake device is for the tests only.** `--fake-device` and `--base-serial fake` are refused unless `MOZA_CONNECTOR_TESTING=1`.
 - **No loopback.** The connector subscribes only to `rudder_angle_deg`, which it never publishes. If it ever needs to subscribe to a subject it also publishes, filter out its own source id first.
 - **No control authority.** The connector publishes operator input; who holds the conn is decided elsewhere.
 - **Existing subjects only.** The connector publishes `wheel_position_pct`, `joystick_rt/lt_pct` and `button_state_change`. A new subject belongs in keelson's `messages/subjects.yaml`, not here.
 - **keelson is an exact published pin.** Never use a path or a local build.
 - **Tests never touch a network.** The e2e uses a loopback peer with multicast and gossip scouting off.
 - **`tests/` has no `__init__.py`.**
-- **Boxflat is GPL-3.0.** Its protocol notes may inform a serial feature, but its code must never be copied here.
+- **Boxflat is GPL-3.0.** Its protocol notes informed `serial_proto.py` (checked against a live R21 Ultra), but its code must never be copied here.
 
 ## Layout
 
@@ -39,6 +44,9 @@ A Moza direct-drive wheelbase (R21 Ultra) as a keelson helm (README). It publish
 | `inputs.py` | `InputPublisher`: device events to enveloped payloads through a `put(subject, source, bytes)` callback |
 | `rudder_sim.py` | Slipway's steering gear, mirrored: the rudder order, the rate-limited gear, the dead-man (pure) |
 | `rudder_sim_app.py` | `moza-rudder-sim`: that rudder on the bus, steered by the wheel |
+| `serial_proto.py` | The Moza serial framing for the base's steering angle (pure; pinned to captured frames) |
+| `base_serial.py` | The base's serial port (pyserial, Moza vendor id only), `FakeBaseSerial` |
+| `base_stop.py` | `BaseStop`: the hard end stop, setting the base's angle to the helm's lock and putting it back |
 | `store.py` | The settings file: the wheel's setup, the default and your profiles, read at start, written after each remote change (I/O only; the rules are `model.load_state`) |
 | `app.py` | CLI, Zenoh session, liveliness, rudder subscriber, backstop and force-feedback threads |
 

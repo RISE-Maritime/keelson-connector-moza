@@ -22,6 +22,7 @@ dependencies = [
     "evdev==2.0.0; sys_platform == 'linux'",
     # macOS: the wheel is read and driven over USB HID (moza_connector/hid_device.py).
     "hidapi==0.15.0; sys_platform == 'darwin'",
+    "pyserial==3.5",
 ]
 
 [project.optional-dependencies]

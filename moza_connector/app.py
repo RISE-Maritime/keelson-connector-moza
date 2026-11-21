@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import keelson
@@ -24,8 +25,11 @@ from keelson.scaffolding import (
 from keelson.scaffolding.liveliness import declare_liveliness
 from keelson.scaffolding.qos_zenoh import declare_publisher
 
+from . import base_serial
 from . import device as devices
 from . import model, profile as profiles, store
+from .base_serial import BaseSerialError, FakeBaseSerial
+from .base_stop import BaseStop
 from .device import DeviceGone, FakeDevice, MozaDevice
 from .ffb import FfbController
 from .inputs import InputPublisher, RateSettings
@@ -159,6 +163,13 @@ def parser() -> argparse.ArgumentParser:
         "auto: the platform's app-settings folder (none with --fake-device)",
     )
     f.add_argument(
+        "--base-serial",
+        default="none",
+        help="The base's serial port, for the hard end stop (the base's own steering angle set to the helm's "
+        "lock, put back on exit): 'auto' finds a Moza base by its USB vendor id, or a port path; 'none' never "
+        "touches it. Pit House must be closed",
+    )
+    f.add_argument(
         "--ffb-remote",
         action="store_true",
         help="Let configurable/v1 (Crowsnest) switch force feedback and tune it, never above --ffb-max-gain-pct. "
@@ -172,6 +183,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.fake_device and os.environ.get(TESTING_ENV) != "1":
         p.error(f"--fake-device is for the tests only (set {TESTING_ENV}=1)")
+    if args.base_serial == "fake" and os.environ.get(TESTING_ENV) != "1":
+        p.error(f"--base-serial fake is for the tests only (set {TESTING_ENV}=1)")
     if args.device and devices.resolve_backend(args.backend) != "evdev":
         p.error("--device names an evdev node: it needs --backend evdev")
     if args.axis_min_hz < 0 or args.axis_max_hz < 0:
@@ -216,6 +229,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def open_base_serial(args):
+    """The base's serial port for ``--base-serial``, or None. Raises BaseSerialError or OSError."""
+    if args.base_serial == "none":
+        return None
+    if args.base_serial == "fake":
+        return FakeBaseSerial(int(os.environ.get("MOZA_FAKE_BASE_ANGLE", "450")), os.environ.get("MOZA_FAKE_BASE_FILE"))
+    path = base_serial.find_base_serial() if args.base_serial == "auto" else args.base_serial
+    if path is None:
+        raise BaseSerialError("no Moza base serial port found")
+    return base_serial.BaseSerial(path)
+
+
 def open_device(args, profile: profiles.Profile, shutdown: GracefulShutdown) -> MozaDevice | None:
     if args.fake_device:
         return FakeDevice.from_file(args.fake_device)
@@ -255,13 +280,20 @@ def run(args: argparse.Namespace) -> int:
         dev = open_device(args, prof, shutdown)
         if dev is None:
             return EXIT_OK if shutdown.is_requested() else EXIT_NO_DEVICE
+        stops: list[BaseStop] = []
         try:
-            return _run_with_device(args, prof, dev, shutdown)
+            return _run_with_device(args, prof, dev, shutdown, stops)
         finally:
+            # After force feedback has let go (in _run_with_device): put the base's own
+            # steering angle back. Never raises.
+            for stop in stops:
+                stop.restore()
             dev.close()
 
 
-def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: GracefulShutdown) -> int:
+def _run_with_device(
+    args, prof: profiles.Profile, dev: MozaDevice, shutdown: GracefulShutdown, stops: list[BaseStop]
+) -> int:
     conf = create_zenoh_config(mode=args.mode, connect=args.connect, listen=args.listen, zenoh_config=args.zenoh_config)
     publishers: dict[tuple[str, str], zenoh.Publisher] = {}
 
@@ -308,6 +340,7 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
             command_line=model.behaviour_of(settings),
             enabled=not args.ffb_remote and args.ffb != FfbMode.OFF.value,
         )
+        doc = None
         if settings_path is not None:
             doc = store.read(settings_path)
             if doc is not None:
@@ -315,6 +348,31 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                 for note in notes:
                     log.warning("Settings file %s: %s", settings_path, note)
                 log.info("Settings from %s (%d profiles of yours)", settings_path, len(helm.user))
+        # The hard end stop: the base's own steering angle, over its serial port.
+        base_restore: dict | None = None
+
+        def save() -> None:
+            if settings_path is not None:
+                store.write(settings_path, {**model.saved_state(helm), "base_restore": base_restore})
+
+        def persist_restore(restore: dict | None) -> None:
+            nonlocal base_restore
+            base_restore = restore
+            save()
+
+        base_stop = None
+        try:
+            port = open_base_serial(args)
+            if port is not None:
+                base_stop = BaseStop(port, persist_restore)
+                stops.append(base_stop)
+                own, now_deg = base_stop.start((doc or {}).get("base_restore"))
+                helm = replace(helm, settings=replace(helm.settings, base_max_deg=own, base_range_deg=now_deg))
+        except (BaseSerialError, OSError, ImportError) as e:
+            log.warning("--base-serial %s: %s; no hard end stop", args.base_serial, e)
+            base_stop = None
+        if base_stop is None and helm.settings.hard_stop:
+            helm = replace(helm, settings=replace(helm.settings, hard_stop=False))
         start_profile = args.ffb_profile or helm.default_profile
         try:
             helm = model.load_profile(helm, start_profile)
@@ -338,6 +396,23 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
         )
         log.info("Full helm lock at %.0f deg of the base's %.0f lock to lock", args.wheel_lock_deg, args.base_range_deg)
         ffb = FfbController(dev, settings)
+        helm_lock = threading.Lock()  # set_config (a Zenoh thread) and the base's angle (here)
+
+        def sync_base_stop() -> None:
+            """The hard stop: the base's angle follows the helm's lock (when the wheel allows);
+            once it has moved, the axis spans a new range, so the steering and force feedback
+            are rescaled (a lock change ramps the force in again)."""
+            nonlocal helm
+            axis = inputs.steering_axis_pct
+            wheel_deg = None if axis is None else axis / 100.0 * base_stop.current_deg / 2.0
+            new_deg = base_stop.sync(helm.settings, wheel_deg)
+            if new_deg is None:
+                return
+            with helm_lock:
+                helm = replace(helm, settings=replace(helm.settings, base_range_deg=new_deg))
+                now = time.monotonic()
+                ffb.update(model.effective(helm), now)
+                inputs.set_steering(helm.settings.lock_fraction, helm.settings.deadband_pct, now)
 
         lost = threading.Event()  # the base is gone: exit EXIT_DEVICE_LOST
         failed = threading.Event()  # a worker thread died: stop rather than run half a helm
@@ -406,20 +481,29 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                     "active": ffb.running,
                     "spring_source": ffb.spring_source,
                     "backend": "fake" if args.fake_device else devices.resolve_backend(args.backend),
+                    "base_serial": "off" if base_stop is None else base_stop.status,
+                    "base_angle_deg": None if base_stop is None else base_stop.current_deg,
+                    "base_max_deg": helm.settings.base_max_deg,
+                    # With the base's serial port, its angle is read, not set by hand; without
+                    # it there is no hard stop to switch on.
+                    **({"base_range_deg": helm.settings.base_range_deg} if base_stop is not None else {"hard_stop": False}),
                 }
 
             def get_config() -> dict:
                 return {**model.helm_config(helm), **read_only()}
 
             def set_config(patch: dict) -> None:
-                # Read-only keys are compared, not trusted: "active" and "spring_source"
-                # move on their own, so a stale round trip of them is ignored.
+                # Read-only keys are compared, not trusted. Those that move on their own (the
+                # wheel's state, the base's angle) are ignored, so a stale round trip works.
                 nonlocal helm
                 if not isinstance(patch, dict):
                     raise ValueError("set_config expects a JSON object")
+                moving = ("active", "spring_source", "base_serial", "base_angle_deg", "base_range_deg")
                 current = read_only()
-                fixed = {k: v for k, v in current.items() if k not in ("active", "spring_source")}
-                patch = {k: v for k, v in patch.items() if k not in ("active", "spring_source")}
+                fixed = {k: v for k, v in current.items() if k not in moving}
+                if base_stop is not None and "base_range_deg" in patch and patch["base_range_deg"] != current["base_range_deg"]:
+                    raise ValueError("base_range_deg is read from the base (--base-serial)")
+                patch = {k: v for k, v in patch.items() if k not in moving or (k == "base_range_deg" and base_stop is None)}
                 test = patch.pop("test", None)
                 if test is not None:
                     # Trying a haptic changes no setting, so nothing is saved.
@@ -427,17 +511,17 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                         raise ValueError("'test' goes alone, not with settings")
                     ffb.test_pulse(str(test), time.monotonic())
                     return
-                new = model.apply_helm(helm, patch, gain_cap_pct=args.ffb_max_gain_pct, read_only=fixed)
-                if new.enabled and not dev.has_ff():
-                    raise ValueError(f"{dev.name} has no force feedback")
-                log.info("set_config %s", patch)
-                if new.profile != helm.profile:
-                    log.info("Profile: %s", model.profile_label(new, new.profile))
-                ffb.update(model.effective(new), time.monotonic())
-                inputs.set_steering(new.settings.lock_fraction, new.settings.deadband_pct, time.monotonic())
-                helm = new
-                if settings_path is not None:
-                    store.write(settings_path, model.saved_state(helm))
+                with helm_lock:
+                    new = model.apply_helm(helm, patch, gain_cap_pct=args.ffb_max_gain_pct, read_only=fixed)
+                    if new.enabled and not dev.has_ff():
+                        raise ValueError(f"{dev.name} has no force feedback")
+                    log.info("set_config %s", patch)
+                    if new.profile != helm.profile:
+                        log.info("Profile: %s", model.profile_label(new, new.profile))
+                    ffb.update(model.effective(new), time.monotonic())
+                    inputs.set_steering(new.settings.lock_fraction, new.settings.deadband_pct, time.monotonic())
+                    helm = new
+                    save()
 
             make_configurable(session, args.realm, args.entity_id, args.source_id, get_config, set_config)
             subjects.append("configuration_json")
@@ -465,6 +549,8 @@ def _run_with_device(args, prof: profiles.Profile, dev: MozaDevice, shutdown: Gr
                         if wheel is not None and wheel != last_wheel:
                             last_wheel = wheel
                             ffb.on_wheel(wheel, time.monotonic())  # detent clicks
+                        if base_stop is not None:
+                            sync_base_stop()
                     except DeviceGone as e:
                         log.error("The base is gone (%s): stopping, so the helm goes silent", e)
                         lost.set()

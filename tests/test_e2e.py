@@ -397,3 +397,43 @@ def test_remote_test_pulse_plays_and_saves_nothing(h):
     assert not path.exists()  # trying a haptic is not a setting
     ok, err = rpc(h, "set_config", json.dumps({"test": "center", "spring_pct": 50}).encode())
     assert not ok and "goes alone" in err
+
+
+def test_hard_stop_sets_the_bases_angle_and_puts_it_back(h, monkeypatch):
+    base_file = h.tmp / "base_angle.json"
+    monkeypatch.setenv("MOZA_FAKE_BASE_FILE", str(base_file))
+    path = h.tmp / "settings.json"
+    args = ("--ffb-remote", "--ffb-max-gain-pct", "20", "--settings-file", str(path), "--base-serial", "fake",
+            "--ffb-profile", "small-boat")
+    h.start([], *args)
+    key = keelson.construct_rpc_key(REALM, V, "configurable", "v1", "get_config", "moza_r21")
+    wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
+    cfg = json.loads(rpc(h, "get_config")[1])
+    assert (cfg["base_serial"], cfg["base_angle_deg"], cfg["base_max_deg"], cfg["hard_stop"]) == ("base at 900°", 900.0, 900.0, False)
+    ok, err = rpc(h, "set_config", json.dumps({"base_range_deg": 540}).encode())
+    assert not ok and "read from the base" in err
+
+    assert rpc(h, "set_config", json.dumps({"hard_stop": True}).encode())[0]  # small boat: lock 90
+    wait(lambda: json.loads(base_file.read_text()) == {"limit": 90, "max-angle": 90}, what="the base at 180 deg")
+    wait(lambda: json.loads(rpc(h, "get_config")[1])["base_serial"] == "hard stop at ±90°", what="the status")
+    cfg = json.loads(rpc(h, "get_config")[1])
+    assert (cfg["base_range_deg"], cfg["wheel_lock_deg"]) == (180.0, 90.0)
+    assert json.loads(path.read_text())["base_restore"] == {"limit": 450, "max-angle": 450}
+
+    h.proc.send_signal(signal.SIGTERM)
+    assert h.proc.wait(timeout=10) == 0
+    assert json.loads(base_file.read_text()) == {"limit": 450, "max-angle": 450}  # put back on exit
+    assert json.loads(path.read_text())["base_restore"] is None
+
+    # A run that dies with the base narrowed: the next start puts it back first.
+    h.start([], *args)
+    wait(lambda: json.loads(base_file.read_text()) == {"limit": 90, "max-angle": 90}, what="narrowed again")
+    h.proc.kill()
+    h.proc.communicate()
+    h.start([], *(a for a in args if a not in ("--ffb-profile", "small-boat")), "--ffb-profile", "ship")
+    wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1 after the crash")
+    assert rpc(h, "set_config", json.dumps({"hard_stop": False}).encode())[0]
+    wait(lambda: json.loads(base_file.read_text()) == {"limit": 450, "max-angle": 450}, what="put back")
+    h.proc.send_signal(signal.SIGTERM)
+    out = h.proc.communicate(timeout=10)[0]
+    assert "still narrowed by an earlier run" in out

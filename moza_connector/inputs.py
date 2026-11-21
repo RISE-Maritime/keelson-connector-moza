@@ -109,6 +109,18 @@ class InputPublisher:
                     return axis.value
         return None
 
+    @property
+    def steering_axis_pct(self) -> float | None:
+        """The steering axis itself, -100..100 of the base's own half range, before the helm's
+        lock: where the wheel really is, also past full lock (where the published value stays
+        at 100)."""
+        with self._lock:
+            for axis in self._axes.values():
+                if axis.map.steering and axis.raw is not None:
+                    m, r = axis.map, axis.range
+                    return model.normalize(axis.raw, r.lo, r.hi, bipolar=m.bipolar, invert=m.invert)
+        return None
+
     def _scaled(self, axis: _Axis, raw: int) -> float:
         m, r = axis.map, axis.range
         axis.raw = raw

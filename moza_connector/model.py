@@ -121,6 +121,17 @@ class FfbSettings:
     alarm_min_priority: str = "warning"
     #: Extra damping while the rudder trails the wheel's order (0: none).
     lag_resistance_pct: float = 0.0
+    #: The hard end stop: the base's own steering angle set to the helm's lock, over its serial
+    #: port (``--base-serial``). ``base_max_deg`` is the base's own angle before any narrowing
+    #: (0 when there is no serial port): the widest ``base_range_deg`` may be, and what full lock
+    #: means. ``base_range_deg`` stays the angle the base has now, which the axis spans.
+    hard_stop: bool = False
+    base_max_deg: float = 0.0
+
+    @property
+    def lock_limit_deg(self) -> float:
+        """The widest full helm lock: half the base's own angle (before any narrowing)."""
+        return (self.base_max_deg or self.base_range_deg) / 2.0
 
     @property
     def deadband_pct(self) -> float:
@@ -237,7 +248,7 @@ CONFIG_BOUNDS = {
 }
 #: keelson.Alarm.Priority values a rumble may start from.
 ALARM_PRIORITIES = {"caution": 2, "warning": 3, "emergency": 4}
-CONFIG_WRITABLE = ("mode", "max_gain_pct", *CONFIG_BOUNDS, "rudder_invert", "alarm_min_priority")
+CONFIG_WRITABLE = ("mode", "max_gain_pct", *CONFIG_BOUNDS, "rudder_invert", "alarm_min_priority", "hard_stop")
 
 
 def config_of(settings: FfbSettings) -> dict:
@@ -250,6 +261,7 @@ def config_of(settings: FfbSettings) -> dict:
         "rudder_max_deg": settings.rudder_max_deg,
         "stale_s": settings.stale_s,
         "rudder_invert": settings.rudder_invert,
+        "hard_stop": settings.hard_stop,
         "base_range_deg": settings.base_range_deg,
         "wheel_lock_deg": settings.wheel_lock_deg,
         "endstop_pct": settings.endstop_pct,
@@ -298,9 +310,9 @@ def apply_config(
             if value not in ALARM_PRIORITIES:
                 raise ValueError(f"alarm_min_priority must be one of {list(ALARM_PRIORITIES)}, got {value!r}")
             changes[key] = value
-        elif key == "rudder_invert":
+        elif key in ("rudder_invert", "hard_stop"):
             if not isinstance(value, bool):
-                raise ValueError(f"rudder_invert must be true or false, got {value!r}")
+                raise ValueError(f"{key} must be true or false, got {value!r}")
             changes[key] = value
         else:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
@@ -320,10 +332,10 @@ def apply_config(
             f"center_deadband_deg {new.center_deadband_deg:g} must be under half of wheel_lock_deg "
             f"{new.wheel_lock_deg:g}"
         )
-    if new.wheel_lock_deg > new.base_range_deg / 2.0:
+    if new.wheel_lock_deg > new.lock_limit_deg:
         raise ValueError(
             f"wheel_lock_deg {new.wheel_lock_deg:g} is past the base's own end "
-            f"(half of base_range_deg {new.base_range_deg:g})"
+            f"(half of {new.base_max_deg or new.base_range_deg:g})"
         )
     return new
 
@@ -503,7 +515,7 @@ BEHAVIOUR_KEYS = (
     "alarm_min_priority", "lag_resistance_pct",
 )
 #: The wheel's setup: it belongs to this wheel, not to a profile, and is always remembered.
-SETUP_KEYS = ("max_gain_pct", "base_range_deg", "rudder_invert", "stale_s")
+SETUP_KEYS = ("max_gain_pct", "base_range_deg", "rudder_invert", "stale_s", "hard_stop")
 #: The built-in profile made of the command line's behaviour flags.
 COMMAND_LINE = "command-line"
 COMMAND_LINE_LABEL = "Command line"
@@ -564,7 +576,7 @@ def profile_settings(helm: Helm, name: str) -> dict:
     """Profile ``name``'s complete values, on this wheel. A built-in preset is the defaults
     with its own settings over them, so choosing one sets every behaviour key; a lock is
     pulled in to the base's own end."""
-    base = helm.settings.base_range_deg
+    base = helm.settings.lock_limit_deg * 2.0  # the base's own angle: "full" is all of it
     if name == COMMAND_LINE:
         values = dict(helm.command_line)
     elif name in PRESETS:
@@ -733,6 +745,8 @@ def saved_state(helm: Helm) -> dict:
     operator's own profiles. Never ``enabled`` (force feedback always starts off) and never
     unsaved changes."""
     current = config_of(helm.settings)
+    # The base's own angle, not one the hard stop narrowed it to: what it is put back to.
+    current["base_range_deg"] = helm.settings.base_max_deg or helm.settings.base_range_deg
     return {
         "version": 2,
         "setup": {k: current[k] for k in SETUP_KEYS},
@@ -780,6 +794,10 @@ def load_state(doc, helm: Helm, *, gain_cap_pct: float) -> tuple[Helm, list[str]
     if isinstance(gain, (int, float)) and not isinstance(gain, bool) and gain > cap:
         setup["max_gain_pct"] = cap
         notes.append(f"saved gain {gain:g} % is above today's cap: {cap:g} %")
+    base = setup.get("base_range_deg")
+    if isinstance(base, (int, float)) and not isinstance(base, bool) and helm.settings.wheel_lock_deg > base / 2.0:
+        # A smaller base than the command line's lock: the lock is pulled in (a profile sets it next).
+        setup["wheel_lock_deg"] = max(CONFIG_BOUNDS["wheel_lock_deg"][0], base / 2.0)
     try:
         helm = replace(helm, settings=apply_config(helm.settings, setup, gain_cap_pct=gain_cap_pct, read_only={}))
     except ValueError as e:
@@ -966,3 +984,37 @@ def test_pulse_level(settings: FfbSettings, name: str) -> int:
     if level == 0:
         raise ValueError(f"{label} is 0 %: raise it to feel the test")
     return level
+
+
+# --- The hard end stop: the base's own steering angle (--base-serial) ----------------------
+
+#: The narrowest steering angle the connector sets on the base, lock to lock.
+BASE_MIN_RANGE_DEG = 90.0
+#: A narrower angle is set only while the wheel is at least this far inside it.
+BASE_WHEEL_MARGIN_DEG = 5.0
+
+
+def base_range_for(settings: FfbSettings) -> float:
+    """The steering angle the base should have, lock to lock: twice the helm's lock (rounded
+    to the base's whole degrees either side) while the hard stop is on, else its own."""
+    own = settings.base_max_deg or settings.base_range_deg
+    if not settings.hard_stop:
+        return own
+    return clamp(2.0 * round(settings.wheel_lock_deg), BASE_MIN_RANGE_DEG, own)
+
+
+def base_stop_decision(target_deg: float, current_deg: float, wheel_deg: float | None) -> tuple[str, str]:
+    """What to do about the base's angle: ``("none", "")`` when it is right, ``("apply", "")``
+    to set it, or ``("wait", why)``. Wider is always safe. Narrower only while the wheel is
+    inside the new angle by the margin: the base's stop must never snap a wheel that is
+    outside it."""
+    if abs(target_deg - current_deg) < 1.0:
+        return "none", ""
+    if target_deg > current_deg:
+        return "apply", ""
+    inside = target_deg / 2.0 - BASE_WHEEL_MARGIN_DEG
+    if wheel_deg is None:
+        return "wait", "waiting for the wheel's position"
+    if abs(wheel_deg) <= inside:
+        return "apply", ""
+    return "wait", f"turn the wheel within ±{inside:g}°"
