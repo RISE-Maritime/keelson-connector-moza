@@ -65,6 +65,8 @@ _EFFECT_TYPES = {codes.FF_SPRING: "ETSpring", codes.FF_DAMPER: "ETDamper"}
 #: Effects that play until stopped, so are leased; a click ends by itself.
 _LEASED = frozenset(_EFFECT_TYPES.values())
 _CLICK = "ETSquare"
+#: The centre notch's force: like a click it ends by itself, and is never leased.
+_CONSTANT = "ETConstantForce"
 _PID_REPORTS = (
     ("Output", "SetEffectReport"),
     ("Output", "SetConditionReport"),
@@ -144,6 +146,10 @@ class HidDevice:
         self._periodic: Report | None = None
         if self._pid is not None and _CLICK in self._pid["SetEffectReport"].slot("EffectType")[0].usages:
             self._periodic = desc.find("Output", "SetPeriodicReport")
+        # The constant force (the centre notch) is optional too.
+        self._constant: Report | None = None
+        if self._pid is not None and _CONSTANT in self._pid["SetEffectReport"].slot("EffectType")[0].usages:
+            self._constant = desc.find("Output", "SetConstantForceReport")
 
         # One lock for every write and for the effect bookkeeping, so the lease renewal can
         # never re-start an effect between shutdown's stop and its erase.
@@ -389,6 +395,41 @@ class HidDevice:
                 "Period": max(1, period_ms),
             },
         )
+        return effect_id
+
+    def upload_constant(self, effect_id: int, *, magnitude: int, duration_ms: int) -> int:
+        """A constant force for ``duration_ms`` each time it is started. Never leased, like a
+        click: its own duration ends it, and that may not exceed a lease. A magnitude outside
+        the descriptor's range raises: never clipped."""
+        if not 0 < duration_ms <= EFFECT_LEASE_MS:
+            raise ValueError(f"a constant force lasts 1..{EFFECT_LEASE_MS} ms, not {duration_ms}")
+        pid = self._pid_reports()
+        constant = self._constant
+        if constant is None:
+            raise NotImplementedError(f"{self.name} has no constant force effect")
+        self._prepare()
+        if effect_id == -1:
+            effect_id = self._create(_CONSTANT)
+            self._effects[effect_id] = _CONSTANT
+            self._send(
+                pid["SetEffectReport"],
+                {
+                    "EffectBlockIndex": effect_id,
+                    "EffectType": _CONSTANT,
+                    "Duration": duration_ms,
+                    "TriggerRepeatInterval": 0,
+                    "SamplePeriod": 0,
+                    "StartDelay": 0,
+                    "Gain": pid["SetEffectReport"].slot("Gain")[0].lmax,
+                    "TriggerButton": NULL,
+                    "AxesEnable/X": 1,
+                    "DirectionEnable": 1,
+                    "Direction/Ordinal1": MOZA_DIRECTION,
+                },
+            )
+        elif self._effects.get(effect_id) != _CONSTANT:
+            raise ValueError(f"effect {effect_id} is not an uploaded constant force")
+        self._send(constant, {"EffectBlockIndex": effect_id, "Magnitude": magnitude})
         return effect_id
 
     def _operate(self, effect_id: int, on: bool) -> None:

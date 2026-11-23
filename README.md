@@ -53,11 +53,13 @@ When the base's effect pool is full, a haptic that can't be loaded is logged and
 
 **The centre mark.** In every mode, while force feedback is on, the wheel gives a distinct pulse each time it reaches centre (`--ffb-center-mark-pct`, default 80; 0 for none). It lasts 60 ms, twice a detent click, so centre feels different from a notch. Centre is within 1° of wheel rotation, and is left only past 2°, so a wheel resting there doesn't buzz. Passing straight over centre between two readings also marks it; leaving it doesn't. No preset changes it.
 
+**The centre notch.** A dip at midship that the wheel settles into, like the notch on a hardware helm (`--ffb-center-notch-pct`, default 0: off; `--ffb-center-notch-deg`, default 5). Within that many wheel degrees of centre the wheel is pulled into centre, hardest halfway out, so leaving it is a ridge to push over; past it the wheel is free. It works in `center` and `detent` modes, never in `follow-up`, where the wheel goes where the rudder is. A spring can't make it: a spring's pull per degree scales with the base's range, so on a 900° base even a full spring gives about 1 % of the force 5° out. The notch is a constant force instead, set from where the wheel really is. Each play lasts 250 ms and only the loop that reads the wheel plays it again, so if that loop stops, so does the force.
+
 In every mode except `off`, the connector also adds a damper (`--ffb-damper-pct`, 0 to disable) and switches off the base's own autocentre so the two don't fight.
 
 ### Profiles
 
-A profile is the wheel's whole behaviour: the mode, spring, centring boost, damper, end stop, full lock, centre deadband, rudder at full lock, clicks, centre mark and every haptic. It never holds the gain (the overall strength, under the cap) nor the wheel's setup (base range, rudder invert, stale time), which belong to this wheel.
+A profile is the wheel's whole behaviour: the mode, spring, centring boost, damper, end stop, full lock, centre deadband, rudder at full lock, clicks, centre mark, centre notch and every haptic. It never holds the gain (the overall strength, under the cap) nor the wheel's setup (base range, rudder invert, stale time), which belong to this wheel.
 
 - **Built in:** the presets below, each its own settings over the defaults (so choosing one also sets the haptics), and `command-line`, the `--ffb-*` flags the connector was started with.
 - **Your own:** saved from Crowsnest under a name; they can be saved again after tuning, and deleted.
@@ -121,6 +123,7 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `detent_deg` | yes | 0.5 … 30: degrees of rudder order between clicks in `detent` mode |
 | `detent_pct` | yes | 0 … 100: click strength in `detent` mode |
 | `center_mark_pct` | yes | 0 … 100: the centre mark's strength, 0 for none |
+| `center_notch_pct`, `center_notch_deg` | yes | 0 … 100: the centre notch's pull at its peak (0: off); 1 … 15: wheel degrees either side of centre it reaches |
 | `center_deadband_deg` | yes | 0 … 30, under half the lock: wheel degrees either side of centre that order exactly 0 |
 | `spring_boost` | yes | 1 … 3: how many times steeper the centring spring is near centre |
 | `hardover_warn_deg`, `hardover_pct` | yes | 0 … under `rudder_max_deg` (0: off); the warning's strength |
@@ -316,6 +319,8 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
                     [--ffb-detent-pct FFB_DETENT_PCT]
                     [--ffb-spring-boost FFB_SPRING_BOOST]
                     [--ffb-center-mark-pct FFB_CENTER_MARK_PCT]
+                    [--ffb-center-notch-pct FFB_CENTER_NOTCH_PCT]
+                    [--ffb-center-notch-deg FFB_CENTER_NOTCH_DEG]
                     [--ffb-hardover-warn-deg FFB_HARDOVER_WARN_DEG]
                     [--ffb-hardover-pct FFB_HARDOVER_PCT]
                     [--ffb-speed-full-kn FFB_SPEED_FULL_KN]

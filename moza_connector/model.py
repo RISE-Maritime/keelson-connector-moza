@@ -103,6 +103,11 @@ class FfbSettings:
     detent_pct: float = 60.0
     #: The centre mark: a distinct pulse each time the wheel reaches centre, 0 for none.
     center_mark_pct: float = 80.0
+    #: The centre notch: within ``center_notch_deg`` of centre the wheel is pulled into it,
+    #: hardest halfway out, so it settles at midship and leaving it is a ridge to push over.
+    #: This strong at its peak, 0 for none. Centre and detent modes; never follow-up.
+    center_notch_pct: float = 0.0
+    center_notch_deg: float = 5.0
     #: Wheel degrees either side of centre that order exactly 0: a spring never brings the
     #: wheel exactly to centre against the base's friction, and a ship needs a true 0.
     center_deadband_deg: float = 0.0
@@ -266,6 +271,8 @@ CONFIG_BOUNDS = {
     "detent_deg": (0.5, 30.0),
     "detent_pct": (0.0, 100.0),
     "center_mark_pct": (0.0, 100.0),
+    "center_notch_pct": (0.0, 100.0),
+    "center_notch_deg": (1.0, 15.0),
     "center_deadband_deg": (0.0, 30.0),  # and under half the wheel lock
     "spring_boost": (1.0, 3.0),
     "hardover_warn_deg": (0.0, 89.0),  # and under rudder_max_deg
@@ -324,6 +331,8 @@ def config_of(settings: FfbSettings) -> dict:
         "detent_deg": settings.detent_deg,
         "detent_pct": settings.detent_pct,
         "center_mark_pct": settings.center_mark_pct,
+        "center_notch_pct": settings.center_notch_pct,
+        "center_notch_deg": settings.center_notch_deg,
         "center_deadband_deg": settings.center_deadband_deg,
         "spring_boost": settings.spring_boost,
         "hardover_warn_deg": settings.hardover_warn_deg,
@@ -570,6 +579,7 @@ def preset_patch(name: str, base_range_deg: float) -> dict:
 BEHAVIOUR_KEYS = (
     "mode", "spring_pct", "spring_boost", "damper_pct", "endstop_pct", "wheel_lock_deg",
     "center_deadband_deg", "rudder_max_deg", "detent_deg", "detent_pct", "center_mark_pct",
+    "center_notch_pct", "center_notch_deg",
     "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct", *ALARM_SETTING_KEYS,
     "lag_resistance_pct",
 )
@@ -950,6 +960,61 @@ def center_reached(side: int | None, new: int) -> bool:
 def center_mark_level(settings: FfbSettings) -> int:
     """The centre mark's magnitude (s16, 0..0x7FFF)."""
     return coeff_level(settings.center_mark_pct)
+
+
+# --- The centre notch ---------------------------------------------------------------------
+#
+# A spring cannot make it: a condition effect's pull per degree scales with the base's range,
+# so on a 900 degree base even a full spring gives about 1 % of the force 5 degrees out. The
+# notch is a constant force instead, its magnitude set from where the wheel is. Each play
+# lasts NOTCH_MS and only the loop that reads the wheel plays it again: if that loop stops,
+# the force ends by itself.
+
+#: One play of the notch force lasts this long (under a lease); it is never renewed by a
+#: keepalive, only by the loop that reads the wheel.
+NOTCH_MS = 250
+#: The wheel-reading loop plays the notch again this often while it pulls. The loop passes
+#: at least every 50 ms (``app.POLL_S``), so a play is renewed well before it ends.
+NOTCH_RENEW_S = 0.1
+#: A new magnitude is written only when it moves this much (s16, ~0.5 % of full) ...
+NOTCH_EPSILON = 160
+#: ... and at most this often.
+NOTCH_MIN_INTERVAL_S = 0.004
+#: Which way a positive constant force turns the base, in device coordinates: -1 pushes the
+#: axis toward its negative end. Checked on the R21 Ultra by holding the wheel off centre.
+NOTCH_SIGN = -1
+
+
+def notch_active(settings: FfbSettings) -> bool:
+    """A notch only when it has a strength, in centre or detent mode (follow-up's wheel
+    goes where the rudder is: a notch at midship would catch it there)."""
+    return settings.center_notch_pct > 0 and settings.mode in (FfbMode.CENTER, FfbMode.DETENT)
+
+
+def notch_force(deg: float, settings: FfbSettings) -> float:
+    """The notch's pull for the wheel ``deg`` from centre, as a fraction -1..1 of its
+    strength, toward centre (so the opposite sign to ``deg``): growing to the full pull
+    halfway out, falling back to 0 at ``center_notch_deg``, nothing beyond."""
+    if not notch_active(settings):
+        return 0.0
+    width = settings.center_notch_deg
+    a = abs(deg)
+    if a >= width:
+        return 0.0
+    peak = width / 2.0
+    share = a / peak if a <= peak else (width - a) / peak
+    return -math.copysign(share, deg) if a > 0 else 0.0
+
+
+def notch_level(axis_pct: float, settings: FfbSettings) -> int:
+    """The notch's constant-force magnitude (s16, device coordinates) for the steering axis
+    at ``axis_pct`` of its half travel (``InputPublisher.steering_axis_pct``: unsnapped,
+    and already through the profile's invert)."""
+    deg = clamp(axis_pct, -100.0, 100.0) / 100.0 * settings.base_range_deg / 2.0
+    force = notch_force(deg, settings) * clamp(settings.center_notch_pct, 0.0, 100.0) / 100.0
+    if settings.wheel_invert:
+        force = -force  # back to the device's own direction
+    return round(NOTCH_SIGN * force * S16_MAX) + 0
 
 
 # --- Haptics: hard-over warning, speed-sensitive weight, alarm rumble, gear lag ------------

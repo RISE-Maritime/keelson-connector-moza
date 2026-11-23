@@ -370,3 +370,35 @@ def test_click_bytes_and_it_is_never_leased():
     with pytest.raises(ValueError):
         dev.upload_click(-1, magnitude=1, period_ms=20, duration_ms=EFFECT_LEASE_MS + 1)
     dev.close()
+
+
+def test_constant_force_bytes_and_it_is_never_leased():
+    dev, h = device()
+    desc = hid_report.parse(DESCRIPTOR)
+    types = desc.find("Output", "SetEffectReport").slot("EffectType")[0].usages
+    constant = desc.find("Output", "SetConstantForceReport")
+    idx = dev.upload_constant(-1, magnitude=-1234, duration_ms=model.NOTCH_MS)
+    assert h.features[-1] == bytes([17, types.index("ETConstantForce") + 1, 0, 0])
+    assert h.writes[-2][:5] == bytes([1, idx, types.index("ETConstantForce") + 1, *model.NOTCH_MS.to_bytes(2, "little")])
+    assert h.writes[-1] == constant.encode({"EffectBlockIndex": idx, "Magnitude": -1234})
+    # A new magnitude re-sends the force only: no new effect, the same duration.
+    n, f = len(h.writes), len(h.features)
+    assert dev.upload_constant(idx, magnitude=900, duration_ms=model.NOTCH_MS) == idx
+    assert h.writes[n:] == [constant.encode({"EffectBlockIndex": idx, "Magnitude": 900})]
+    assert len(h.features) == f
+    dev.play(idx, True)
+    n = len(h.writes)
+    dev.renew_leases()
+    assert len(h.writes) == n  # never renewed by the keepalive: it ends by itself
+    with pytest.raises(ValueError):
+        dev.upload_constant(-1, magnitude=1, duration_ms=EFFECT_LEASE_MS + 1)
+    with pytest.raises(ValueError):
+        dev.upload_constant(idx, magnitude=40000, duration_ms=model.NOTCH_MS)  # out of range: never clipped
+    spring = dev.upload_condition(codes.FF_SPRING, -1, center=0, coeff=1, saturation=1)
+    with pytest.raises(ValueError):
+        dev.upload_constant(spring, magnitude=1, duration_ms=model.NOTCH_MS)
+    dev.close()
+
+
+def test_notch_play_is_well_inside_a_lease():
+    assert model.NOTCH_RENEW_S * 1000 * 2 <= model.NOTCH_MS <= EFFECT_LEASE_MS

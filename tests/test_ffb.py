@@ -547,3 +547,101 @@ def test_test_pulse_refuses_when_nothing_could_be_felt():
     with pytest.raises(ValueError):
         c.test_pulse("center", 1.0)
     assert dev.ff_log == before
+
+
+# --- The centre notch ---------------------------------------------------------------------
+
+
+def constants(dev):
+    return [e for e in dev.ff_log if e[0] == "constant"]
+
+
+def notch_settings(**kw):
+    return FfbSettings(mode=FfbMode.DETENT, base_range_deg=900, center_notch_pct=50, center_notch_deg=6,
+                       center_mark_pct=0, detent_pct=0, **kw)
+
+
+AT_PEAK = 3.0 / 450 * 100  # the axis 3 deg to starboard on a 900 deg base
+
+
+def test_no_notch_while_off_or_before_start():
+    dev = fake()
+    c = FfbController(dev, notch_settings())
+    assert c.on_axis(AT_PEAK, 0.0) == 0  # not started
+    c.start(0.0)
+    c.update(replace(notch_settings(), center_notch_pct=0), 0.1)
+    assert c.on_axis(AT_PEAK, 0.2) == 0
+    assert constants(dev) == []
+
+
+def test_notch_played_by_the_wheel_loop_renewed_and_stopped_outside():
+    dev = fake()
+    s = notch_settings()
+    c = FfbController(dev, s)
+    c.start(0.0)
+    level = c.on_axis(AT_PEAK, 0.0)
+    assert level == model.notch_level(AT_PEAK, s) != 0
+    ((_, nid, mag, ms),) = constants(dev)
+    assert (mag, ms) == (level, model.NOTCH_MS)
+    assert dev.ff_log[-1] == ("play", nid, True)
+    # A tiny move writes nothing; the play is renewed only after NOTCH_RENEW_S.
+    n = len(dev.ff_log)
+    c.on_axis(AT_PEAK * 0.999, 0.05)
+    assert len(dev.ff_log) == n
+    c.on_axis(AT_PEAK * 0.999, 0.05 + model.NOTCH_RENEW_S)
+    assert dev.ff_log[n:] == [("play", nid, True)]
+    # A real move rewrites the magnitude on the same effect.
+    c.on_axis(AT_PEAK / 2, 0.2)
+    assert constants(dev)[-1][:2] == ("constant", nid) and constants(dev)[-1][2] == model.notch_level(AT_PEAK / 2, s)
+    # Past the notch: stopped, not erased.
+    c.on_axis(50.0, 0.3)
+    assert dev.ff_log[-1] == ("play", nid, False)
+    n = len(dev.ff_log)
+    c.on_axis(60.0, 0.4)
+    assert len(dev.ff_log) == n  # stays quiet
+    # Back in: played again on the same effect.
+    c.on_axis(AT_PEAK, 0.5)
+    assert ("play", nid, True) == dev.ff_log[-1] and len({e[1] for e in constants(dev)}) == 1
+    c.shutdown()
+    assert ("erase", nid) in dev.ff_log
+    assert c.on_axis(AT_PEAK, 1.0) == 0  # never again after shutdown
+
+
+def test_the_tick_never_renews_the_notch():
+    dev = fake()
+    c = FfbController(dev, notch_settings())
+    c.start(0.0)
+    c.on_axis(AT_PEAK, 0.0)
+    nid = constants(dev)[0][1]
+    plays = dev.ff_log.count(("play", nid, True))
+    for t in (0.05, 0.1, 0.5, 1.0, 2.0):
+        c.tick(t)
+    assert dev.ff_log.count(("play", nid, True)) == plays
+
+
+def test_notch_erased_on_follow_up_or_off_remotely():
+    for change in ({"mode": FfbMode.FOLLOW_UP}, {"center_notch_pct": 0.0}, {"mode": FfbMode.OFF}):
+        dev = fake()
+        s = notch_settings()
+        c = FfbController(dev, s)
+        c.start(0.0)
+        c.on_axis(AT_PEAK, 0.0)
+        nid = constants(dev)[0][1]
+        c.update(replace(s, **change), 1.0)
+        assert ("erase", nid) in dev.ff_log, change
+        if change.get("mode") is not FfbMode.OFF:
+            assert c.on_axis(AT_PEAK, 1.1) == 0
+
+
+def test_a_base_without_constant_force_goes_without_a_notch():
+    dev = fake()
+
+    def refuse(*a, **kw):
+        raise NotImplementedError("no constant force")
+
+    dev.upload_constant = refuse
+    c = FfbController(dev, notch_settings())
+    c.start(0.0)
+    assert c.on_axis(AT_PEAK, 0.0) == 0
+    assert c.on_axis(AT_PEAK, 0.5) == 0  # said once, not retried
+    c.tick(1.0)  # the rest goes on

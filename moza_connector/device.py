@@ -72,6 +72,12 @@ class MozaDevice(Protocol):
         ``duration_ms`` each time it is started; returns the effect id."""
         ...
 
+    def upload_constant(self, effect_id: int, *, magnitude: int, duration_ms: int) -> int:
+        """Upload (``effect_id`` -1) or update a constant force (s16 ``magnitude``, device
+        coordinates) that plays ``duration_ms`` each time it is started, then ends by itself;
+        returns the effect id."""
+        ...
+
     def play(self, effect_id: int, on: bool) -> None: ...
 
     def erase(self, effect_id: int) -> None: ...
@@ -96,6 +102,7 @@ class EvdevDevice:
             ("EV_ABS", codes.EV_ABS),
             ("EV_FF", codes.EV_FF),
             ("FF_SPRING", codes.FF_SPRING),
+            ("FF_CONSTANT", codes.FF_CONSTANT),
             ("FF_PERIODIC", codes.FF_PERIODIC),
             ("FF_SQUARE", codes.FF_SQUARE),
             ("FF_DAMPER", codes.FF_DAMPER),
@@ -187,6 +194,18 @@ class EvdevDevice:
             ff.Trigger(0, 0),
             ff.Replay(duration_ms, 0),
             ff.EffectType(ff_periodic_effect=periodic),
+        )
+        return self._dev.upload_effect(effect)
+
+    def upload_constant(self, effect_id: int, *, magnitude: int, duration_ms: int) -> int:
+        ff = self._evdev.ff
+        effect = ff.Effect(
+            codes.FF_CONSTANT,
+            effect_id,
+            0x4000,
+            ff.Trigger(0, 0),
+            ff.Replay(duration_ms, 0),  # never 0: it ends by itself unless played again
+            ff.EffectType(ff_constant_effect=ff.Constant(level=magnitude, ff_envelope=ff.Envelope(0, 0, 0, 0))),
         )
         return self._dev.upload_effect(effect)
 
@@ -341,6 +360,13 @@ class FakeDevice:
             effect_id = self._next_id
             self._next_id += 1
         self._record("click", effect_id, magnitude, period_ms, duration_ms)
+        return effect_id
+
+    def upload_constant(self, effect_id: int, *, magnitude: int, duration_ms: int) -> int:
+        if effect_id == -1:
+            effect_id = self._next_id
+            self._next_id += 1
+        self._record("constant", effect_id, magnitude, duration_ms)
         return effect_id
 
     def play(self, effect_id: int, on: bool) -> None:

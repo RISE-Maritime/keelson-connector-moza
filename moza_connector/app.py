@@ -45,7 +45,7 @@ TESTING_ENV = "MOZA_CONNECTOR_TESTING"
 EXIT_OK, EXIT_FAILED, EXIT_NO_DEVICE, EXIT_DEVICE_LOST = 0, 1, 2, 3
 #: The haptics' settings, each from --ffb-<key with dashes>.
 HAPTIC_KEYS = (
-    "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct",
+    "center_notch_pct", "center_notch_deg", "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct",
     "alarm_caution_pct", "alarm_warning_pct", "alarm_emergency_pct", "lag_resistance_pct",
 )
 FFB_HZ = 20.0
@@ -150,6 +150,13 @@ def parser() -> argparse.ArgumentParser:
         help="A distinct pulse each time the wheel reaches centre, in every mode; 0 for none",
     )
     h = p.add_argument_group("haptics (each off by default)")
+    h.add_argument(
+        "--ffb-center-notch-pct",
+        type=float,
+        default=0.0,
+        help="Centre and detent modes: near centre the wheel is pulled into it, a ridge to push over to leave; its strength",
+    )
+    h.add_argument("--ffb-center-notch-deg", type=float, default=5.0, help="How far either side of centre the notch reaches (wheel degrees)")
     h.add_argument("--ffb-hardover-warn-deg", type=float, default=0.0, help="A pulse at this rudder order, either way")
     h.add_argument("--ffb-hardover-pct", type=float, default=80.0, help="The hard-over pulse's strength")
     h.add_argument("--ffb-speed-full-kn", type=float, default=0.0, help="Full wheel weight from this speed over ground")
@@ -602,6 +609,9 @@ def _run_with_device(
                     try:
                         for ev in dev.events(POLL_S):
                             inputs.handle(ev.type, ev.code, ev.value, time.monotonic())
+                        axis = inputs.steering_axis_pct
+                        if axis is not None:
+                            ffb.on_axis(axis, time.monotonic())  # the centre notch, every pass
                         wheel = inputs.steering_value
                         if wheel is not None and wheel != last_wheel:
                             last_wheel = wheel

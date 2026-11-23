@@ -28,6 +28,7 @@ ABS = {
 }
 ABS_NAMES = {v: k for k, v in ABS.items()}
 
+FF_CONSTANT = 0x52
 FF_PERIODIC = 0x51
 FF_SQUARE = 0x58
 FF_SPRING = 0x53

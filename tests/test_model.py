@@ -530,3 +530,53 @@ def test_test_pulse_level_is_the_pulses_own_strength():
         model.test_pulse_level(s, "detent")
     with pytest.raises(ValueError, match="no pulse"):
         model.test_pulse_level(s, "spring")
+
+
+# --- The centre notch ---------------------------------------------------------------------
+
+
+def test_notch_pulls_to_centre_hardest_halfway_out_and_nothing_past_it():
+    s = FfbSettings(mode=FfbMode.DETENT, center_notch_pct=50, center_notch_deg=6)
+    assert model.notch_force(0.0, s) == 0.0
+    assert model.notch_force(1.5, s) == pytest.approx(-0.5)  # pulled back to port
+    assert model.notch_force(3.0, s) == pytest.approx(-1.0)  # the peak: the ridge
+    assert model.notch_force(4.5, s) == pytest.approx(-0.5)
+    assert model.notch_force(6.0, s) == 0.0 and model.notch_force(40.0, s) == 0.0
+    for deg in (0.7, 2.0, 3.0, 5.2):
+        assert model.notch_force(-deg, s) == pytest.approx(-model.notch_force(deg, s))  # odd
+
+
+def test_notch_only_when_on_and_never_in_follow_up():
+    s = FfbSettings(mode=FfbMode.CENTER, center_notch_pct=50, center_notch_deg=6)
+    assert model.notch_active(s) and model.notch_active(replace(s, mode=FfbMode.DETENT))
+    for off in (replace(s, center_notch_pct=0), replace(s, mode=FfbMode.FOLLOW_UP), replace(s, mode=FfbMode.OFF)):
+        assert not model.notch_active(off) and model.notch_force(3.0, off) == 0.0
+
+
+def test_notch_level_from_the_axis_in_degrees_and_device_coordinates():
+    s = FfbSettings(mode=FfbMode.DETENT, base_range_deg=900, center_notch_pct=50, center_notch_deg=6)
+    axis = 3.0 / 450 * 100  # 3 deg to starboard on a 900 deg base: the peak
+    level = model.notch_level(axis, s)
+    assert level == round(model.NOTCH_SIGN * -0.5 * model.S16_MAX)
+    assert model.notch_level(-axis, s) == -level
+    assert model.notch_level(axis, replace(s, wheel_invert=True)) == -level  # the device's own direction
+    assert model.notch_level(0.0, s) == 0 and model.notch_level(50.0, s) == 0
+    assert model.notch_level(axis, replace(s, center_notch_pct=100)) == round(model.NOTCH_SIGN * -model.S16_MAX)
+
+
+def test_notch_settings_are_bounded_a_profiles_and_saved():
+    with pytest.raises(ValueError):
+        model.apply_config(FfbSettings(), {"center_notch_pct": 101}, gain_cap_pct=15, read_only={})
+    with pytest.raises(ValueError):
+        model.apply_config(FfbSettings(), {"center_notch_deg": 0.5}, gain_cap_pct=15, read_only={})
+    new = model.apply_config(FfbSettings(), {"center_notch_pct": 40, "center_notch_deg": 8}, gain_cap_pct=15, read_only={})
+    assert (new.center_notch_pct, new.center_notch_deg) == (40, 8)
+    assert {"center_notch_pct", "center_notch_deg"} <= set(model.BEHAVIOUR_KEYS)
+    h = apply(helm(), {"center_notch_pct": 40, "center_notch_deg": 8, "save_profile_as": "notch"})
+    back, notes = model.load_state(json.loads(json.dumps(model.saved_state(h))), helm(), gain_cap_pct=15)
+    assert notes == []
+    restored = model.load_profile(back, "notch").settings
+    assert (restored.center_notch_pct, restored.center_notch_deg) == (40, 8)
+    # A file from before the notch: off.
+    old, _ = model.load_state({"settings": {"spring_pct": 60}}, helm(), gain_cap_pct=15)
+    assert old.settings.center_notch_pct == 0

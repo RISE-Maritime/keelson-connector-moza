@@ -1,5 +1,6 @@
-"""Force feedback: the spring (centring or rudder follow-up), the damper, the end stop and the
-short pulses (detent click, centre mark, hard-over warning, alarm rumble) on the base.
+"""Force feedback: the spring (centring or rudder follow-up), the damper, the end stop, the
+centre notch and the short pulses (detent click, centre mark, hard-over warning, alarm rumble)
+on the base.
 
 The controller owns every effect it uploads and is the only thing that touches the
 base's force feedback. ``shutdown`` always leaves the wheel limp: every effect stopped
@@ -64,6 +65,13 @@ class FfbController:
         self._endstop_id: int | None = None
         self._pulses: dict[str, tuple[int, int]] = {}  # name -> (effect id, level)
         self._notch: int | None = None  # the detent the wheel's rudder order sits in
+        # The centre notch: a constant force, played again only by the loop that reads the wheel.
+        self._cnotch_id: int | None = None
+        self._cnotch_level = 0  # the magnitude last written
+        self._cnotch_playing = False
+        self._cnotch_written_at = float("-inf")
+        self._cnotch_played_at = float("-inf")
+        self._cnotch_unavailable = False  # the base has no constant force: said once
         self._center_side: int | None = None  # -1 port of centre, 0 at it, +1 starboard
         self._hardover_side: int | None = None  # +-1 in a hard-over warning zone, else 0
         # The rumble playing (an alarm's pattern), or None.
@@ -351,6 +359,52 @@ class FfbController:
                 return True
             return s.mode is FfbMode.DETENT and at_notch and self._pulse("detent")
 
+    # --- The centre notch -----------------------------------------------------------------
+
+    def on_axis(self, axis_pct: float, now: float) -> int:
+        """The centre notch, from where the wheel really is: the steering axis, -100..100 of
+        the base's half travel, unsnapped (``InputPublisher.steering_axis_pct``). Called on
+        every pass of the loop that reads the wheel, and only by it: each play ends by itself
+        after ``NOTCH_MS``, so if that loop stops, so does the force. Returns the magnitude
+        playing (s16, 0 for none). Raises DeviceGone."""
+        with self._op:
+            if self._started_at is None or self._closed or self._cnotch_unavailable:
+                return 0
+            level = model.notch_level(axis_pct, self._s)
+            if level == 0:
+                self._stop_notch()
+                return 0
+            moved = abs(level - self._cnotch_level) > model.NOTCH_EPSILON
+            if self._cnotch_id is None or (moved and now - self._cnotch_written_at >= model.NOTCH_MIN_INTERVAL_S):
+                try:
+                    self._cnotch_id = self._dev.upload_constant(
+                        -1 if self._cnotch_id is None else self._cnotch_id,
+                        magnitude=level,
+                        duration_ms=model.NOTCH_MS,
+                    )
+                except (NotImplementedError, RuntimeError) as e:
+                    log.warning("No centre notch: %s", e)
+                    self._cnotch_unavailable = True
+                    return 0
+                self._cnotch_level, self._cnotch_written_at = level, now
+            if not self._cnotch_playing or now - self._cnotch_played_at >= model.NOTCH_RENEW_S:
+                self._dev.play(self._cnotch_id, True)
+                self._cnotch_playing, self._cnotch_played_at = True, now
+            return self._cnotch_level
+
+    def _stop_notch(self) -> None:
+        if self._cnotch_id is not None and self._cnotch_playing:
+            self._dev.play(self._cnotch_id, False)
+        self._cnotch_playing = False
+
+    def _drop_notch(self) -> None:
+        """The notch's effect stopped and erased (switched off, or follow-up)."""
+        if self._cnotch_id is None:
+            return
+        self._stop_notch()
+        self._dev.erase(self._cnotch_id)
+        self._cnotch_id, self._cnotch_level = None, 0
+
     # --- The tick (20 Hz) -------------------------------------------------------------------
 
     def _rumble_tick(self, now: float) -> None:
@@ -484,6 +538,8 @@ class FfbController:
                 )
             if settings.lock_fraction != old.lock_fraction or settings.endstop_pct != old.endstop_pct:
                 self._sync_endstop()
+            if not model.notch_active(settings):
+                self._drop_notch()
             self._sync_pulses()
             self._sync_damper(None, force=True)
             self._tick(now)
@@ -493,7 +549,9 @@ class FfbController:
     def _release(self) -> None:
         """Every effect stopped and erased, the gain at 0. Never raises."""
         self._started_at = None
-        effects = (*self._spring_ids, self._damper_id, self._endstop_id, *(p[0] for p in self._pulses.values()))
+        effects = (
+            *self._spring_ids, self._damper_id, self._endstop_id, self._cnotch_id, *(p[0] for p in self._pulses.values()),
+        )
         for effect_id in effects:
             if effect_id is None:
                 continue
@@ -505,6 +563,9 @@ class FfbController:
         self._spring_ids = []
         self._damper_id = self._damper_level = self._endstop_id = None
         self._pulses = {}
+        self._cnotch_id, self._cnotch_level, self._cnotch_playing = None, 0, False
+        self._cnotch_written_at = self._cnotch_played_at = float("-inf")
+        self._cnotch_unavailable = False
         self._spring_playing = False
         self._weight = 1.0
         self._notch = self._hardover_side = None
