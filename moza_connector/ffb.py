@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from typing import NamedTuple
 
 from . import codes, model
@@ -72,6 +73,7 @@ class FfbController:
         self._cnotch_written_at = float("-inf")
         self._cnotch_played_at = float("-inf")
         self._cnotch_unavailable = False  # the base has no constant force: said once
+        self._cnotch_seen: deque[tuple[float, float]] = deque()  # (time, axis %): the wheel's speed
         self._center_side: int | None = None  # -1 port of centre, 0 at it, +1 starboard
         self._hardover_side: int | None = None  # +-1 in a hard-over warning zone, else 0
         # The rumble playing (an alarm's pattern), or None.
@@ -370,7 +372,11 @@ class FfbController:
         with self._op:
             if self._started_at is None or self._closed or self._cnotch_unavailable:
                 return 0
-            level = model.notch_level(axis_pct, self._s)
+            rate = model.axis_rate(self._cnotch_seen, now, axis_pct)
+            self._cnotch_seen.append((now, axis_pct))
+            while now - self._cnotch_seen[0][0] > model.NOTCH_RATE_HISTORY_S:
+                self._cnotch_seen.popleft()
+            level = model.notch_level(axis_pct, self._s, rate)
             if level == 0:
                 self._stop_notch()
                 return 0
@@ -405,6 +411,7 @@ class FfbController:
         self._stop_notch()
         self._dev.erase(self._cnotch_id)
         self._cnotch_id, self._cnotch_level = None, 0
+        self._cnotch_seen.clear()
 
     # --- The tick (20 Hz) -------------------------------------------------------------------
 
@@ -567,6 +574,7 @@ class FfbController:
         self._cnotch_id, self._cnotch_level, self._cnotch_playing = None, 0, False
         self._cnotch_written_at = self._cnotch_played_at = float("-inf")
         self._cnotch_unavailable = False
+        self._cnotch_seen.clear()
         self._spring_playing = False
         self._weight = 1.0
         self._notch = self._hardover_side = None

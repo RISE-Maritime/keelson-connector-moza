@@ -594,8 +594,9 @@ def test_notch_played_by_the_wheel_loop_renewed_and_stopped_outside():
     # A real move (into the core) rewrites the magnitude on the same effect, and starts it again.
     n = len(dev.ff_log)
     c.on_axis(AT_PEAK / 4, 0.2)
-    assert model.notch_level(AT_PEAK / 4, s) != level
-    assert dev.ff_log[n:] == [("constant", nid, model.notch_level(AT_PEAK / 4, s), model.NOTCH_MS), ("play", nid, True)]
+    rate = (AT_PEAK / 4 - AT_PEAK * 0.999) / (0.2 - (0.05 + model.NOTCH_RENEW_S))
+    assert model.notch_level(AT_PEAK / 4, s, rate) != level
+    assert dev.ff_log[n:] == [("constant", nid, model.notch_level(AT_PEAK / 4, s, rate), model.NOTCH_MS), ("play", nid, True)]
     # Past the notch: stopped, not erased.
     c.on_axis(50.0, 0.3)
     assert dev.ff_log[-1] == ("play", nid, False)
@@ -608,6 +609,22 @@ def test_notch_played_by_the_wheel_loop_renewed_and_stopped_outside():
     c.shutdown()
     assert ("erase", nid) in dev.ff_log
     assert c.on_axis(AT_PEAK, 1.0) == 0  # never again after shutdown
+
+
+def test_the_notch_brakes_a_wheel_falling_into_it():
+    s = notch_settings(center_notch_damping_pct=60)
+    still_dev, moving_dev = fake(), fake()
+    still, moving = FfbController(still_dev, s), FfbController(moving_dev, s)
+    still.start(0.0)
+    moving.start(0.0)
+    still.on_axis(AT_PEAK / 4, 0.02)
+    moving.on_axis(AT_PEAK, 0.0)  # 3 deg out ...
+    falling = moving.on_axis(AT_PEAK / 4, 0.02)  # ... and falling in fast
+    held = constants(still_dev)[-1][2]
+    assert constants(moving_dev)[-1][2] == falling
+    # In the wheel's own direction (to port is -): the force moved against the motion, to starboard.
+    assert model.NOTCH_SIGN * falling > model.NOTCH_SIGN * held
+    assert falling == model.notch_level(AT_PEAK / 4, s, (AT_PEAK / 4 - AT_PEAK) / 0.02)
 
 
 def test_the_tick_never_renews_the_notch():

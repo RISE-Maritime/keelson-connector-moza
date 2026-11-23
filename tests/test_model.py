@@ -551,6 +551,34 @@ def test_notch_is_a_v_full_pull_in_to_its_core_and_nothing_past_it():
     assert model.notch_force(0.5, narrow) == pytest.approx(-1.0)
 
 
+def test_axis_rate_over_at_least_its_window():
+    w = model.NOTCH_RATE_WINDOW_S
+    assert model.axis_rate([], 1.0, 5.0) == 0.0
+    assert model.axis_rate([(1.0 - w / 2, 0.0)], 1.0, 5.0) == 0.0  # too recent to tell
+    samples = [(0.9, 0.0), (1.0 - 2 * w, 1.0), (1.0 - w / 2, 4.0)]
+    assert model.axis_rate(samples, 1.0, 2.0) == pytest.approx(1.0 / (2 * w))  # the newest old enough
+    assert model.axis_rate(samples, 1.0, 0.0) == pytest.approx(-1.0 / (2 * w))
+
+
+def test_notch_damping_opposes_the_wheel_inside_the_notch_only():
+    s = FfbSettings(mode=FfbMode.DETENT, center_notch_pct=50, center_notch_deg=6, center_notch_damping_pct=50)
+    full = model.NOTCH_DAMP_FULL_DEG_S
+    # 1 deg out (two thirds of the way into the core), moving: falling in pulls less, climbing out more.
+    still = model.notch_force(1.0, s)
+    assert model.notch_force(1.0, s, -full / 4) == pytest.approx(still + 0.125)
+    assert model.notch_force(1.0, s, full / 4) == pytest.approx(still - 0.125)
+    # At centre it only brakes; never more than the notch's full pull.
+    assert model.notch_force(0.0, s, full / 2) == pytest.approx(-0.25)
+    assert model.notch_force(0.0, s, 100 * full) == -1.0 and model.notch_force(3.0, s, -100 * full) == 1.0
+    # Undamped, it is the plain V; past the notch nothing, whatever the speed.
+    assert model.notch_force(1.0, replace(s, center_notch_damping_pct=0), full) == still
+    assert model.notch_force(6.0, s, full) == 0.0 and model.notch_force(-9.0, s, -full) == 0.0
+    # The axis' rate in %/s becomes degrees the same way its position does (900 deg base).
+    s9 = replace(s, base_range_deg=900)
+    pct_per_deg = 100 / 450
+    assert model.notch_level(0.0, s9, full / 2 * pct_per_deg) == round(model.NOTCH_SIGN * -0.25 * 0.5 * model.S16_MAX)
+
+
 def test_notch_only_when_on_and_never_in_follow_up():
     s = FfbSettings(mode=FfbMode.CENTER, center_notch_pct=50, center_notch_deg=6)
     assert model.notch_active(s) and model.notch_active(replace(s, mode=FfbMode.DETENT))
@@ -574,14 +602,16 @@ def test_notch_settings_are_bounded_a_profiles_and_saved():
         model.apply_config(FfbSettings(), {"center_notch_pct": 101}, gain_cap_pct=15, read_only={})
     with pytest.raises(ValueError):
         model.apply_config(FfbSettings(), {"center_notch_deg": 0.5}, gain_cap_pct=15, read_only={})
+    with pytest.raises(ValueError):
+        model.apply_config(FfbSettings(), {"center_notch_damping_pct": 101}, gain_cap_pct=15, read_only={})
     new = model.apply_config(FfbSettings(), {"center_notch_pct": 40, "center_notch_deg": 8}, gain_cap_pct=15, read_only={})
     assert (new.center_notch_pct, new.center_notch_deg) == (40, 8)
-    assert {"center_notch_pct", "center_notch_deg"} <= set(model.BEHAVIOUR_KEYS)
-    h = apply(helm(), {"center_notch_pct": 40, "center_notch_deg": 8, "save_profile_as": "notch"})
+    assert {"center_notch_pct", "center_notch_deg", "center_notch_damping_pct"} <= set(model.BEHAVIOUR_KEYS)
+    h = apply(helm(), {"center_notch_pct": 40, "center_notch_deg": 8, "center_notch_damping_pct": 70, "save_profile_as": "notch"})
     back, notes = model.load_state(json.loads(json.dumps(model.saved_state(h))), helm(), gain_cap_pct=15)
     assert notes == []
     restored = model.load_profile(back, "notch").settings
-    assert (restored.center_notch_pct, restored.center_notch_deg) == (40, 8)
+    assert (restored.center_notch_pct, restored.center_notch_deg, restored.center_notch_damping_pct) == (40, 8, 70)
     # A file from before the notch: off.
     old, _ = model.load_state({"settings": {"spring_pct": 60}}, helm(), gain_cap_pct=15)
-    assert old.settings.center_notch_pct == 0
+    assert old.settings.center_notch_pct == 0 and old.settings.center_notch_damping_pct == 50

@@ -108,6 +108,9 @@ class FfbSettings:
     #: and leaving takes a push. 0 for none. Centre and detent modes; never follow-up.
     center_notch_pct: float = 0.0
     center_notch_deg: float = 5.0
+    #: Inside the notch its pull also opposes the wheel's speed, so the wheel settles at
+    #: midship instead of swinging about it. Never more than the notch's own strength.
+    center_notch_damping_pct: float = 50.0
     #: Wheel degrees either side of centre that order exactly 0: a spring never brings the
     #: wheel exactly to centre against the base's friction, and a ship needs a true 0.
     center_deadband_deg: float = 0.0
@@ -273,6 +276,7 @@ CONFIG_BOUNDS = {
     "center_mark_pct": (0.0, 100.0),
     "center_notch_pct": (0.0, 100.0),
     "center_notch_deg": (1.0, 15.0),
+    "center_notch_damping_pct": (0.0, 100.0),
     "center_deadband_deg": (0.0, 30.0),  # and under half the wheel lock
     "spring_boost": (1.0, 3.0),
     "hardover_warn_deg": (0.0, 89.0),  # and under rudder_max_deg
@@ -333,6 +337,7 @@ def config_of(settings: FfbSettings) -> dict:
         "center_mark_pct": settings.center_mark_pct,
         "center_notch_pct": settings.center_notch_pct,
         "center_notch_deg": settings.center_notch_deg,
+        "center_notch_damping_pct": settings.center_notch_damping_pct,
         "center_deadband_deg": settings.center_deadband_deg,
         "spring_boost": settings.spring_boost,
         "hardover_warn_deg": settings.hardover_warn_deg,
@@ -579,7 +584,7 @@ def preset_patch(name: str, base_range_deg: float) -> dict:
 BEHAVIOUR_KEYS = (
     "mode", "spring_pct", "spring_boost", "damper_pct", "endstop_pct", "wheel_lock_deg",
     "center_deadband_deg", "rudder_max_deg", "detent_deg", "detent_pct", "center_mark_pct",
-    "center_notch_pct", "center_notch_deg",
+    "center_notch_pct", "center_notch_deg", "center_notch_damping_pct",
     "hardover_warn_deg", "hardover_pct", "speed_full_kn", "speed_min_pct", *ALARM_SETTING_KEYS,
     "lag_resistance_pct",
 )
@@ -987,6 +992,14 @@ NOTCH_SIGN = -1
 #: NOTCH_CORE_MIN_DEG. Outside the core, out to the width, the pull is full.
 NOTCH_CORE_SHARE = 0.25
 NOTCH_CORE_MIN_DEG = 0.3
+#: The notch's damping: at 100 %, the wheel turning this fast meets the notch's full strength
+#: against it. About critical for the R21 Ultra's rim around a firm notch.
+NOTCH_DAMP_FULL_DEG_S = 20.0
+#: The wheel's speed is measured over at least this long, so the axis's smallest steps
+#: (0.014 degrees on a 900 degree base) don't read as speed.
+NOTCH_RATE_WINDOW_S = 0.015
+#: How much of the wheel's recent travel ``FfbController`` keeps for that.
+NOTCH_RATE_HISTORY_S = 0.1
 
 
 def notch_active(settings: FfbSettings) -> bool:
@@ -995,27 +1008,42 @@ def notch_active(settings: FfbSettings) -> bool:
     return settings.center_notch_pct > 0 and settings.mode in (FfbMode.CENTER, FfbMode.DETENT)
 
 
-def notch_force(deg: float, settings: FfbSettings) -> float:
-    """The notch's pull for the wheel ``deg`` from centre, as a fraction -1..1 of its
-    strength, toward centre (so the opposite sign to ``deg``). A V in a rail: the full pull
-    all the way from ``center_notch_deg`` in to the notch's core, where it eases to 0 at
-    centre so the wheel settles there instead of buzzing across it; nothing beyond."""
+def axis_rate(samples, t: float, axis_pct: float) -> float:
+    """How fast the axis moves, %/s: from the newest of ``samples`` (``(time, axis_pct)``,
+    oldest first) at least ``NOTCH_RATE_WINDOW_S`` before ``t`` to ``axis_pct`` now; 0
+    without one."""
+    for then, was in reversed(samples):
+        if t - then >= NOTCH_RATE_WINDOW_S:
+            return (axis_pct - was) / (t - then)
+    return 0.0
+
+
+def notch_force(deg: float, settings: FfbSettings, rate_deg_s: float = 0.0) -> float:
+    """The notch's pull for the wheel ``deg`` from centre and turning ``rate_deg_s``, as a
+    fraction -1..1 of its strength. A V in a rail: toward centre (the opposite sign to
+    ``deg``) at the full pull all the way from ``center_notch_deg`` in to the notch's core,
+    where it eases to 0 at centre. Inside the notch it also opposes the wheel's speed
+    (``center_notch_damping_pct``), so the wheel settles instead of swinging about centre;
+    never more than the full pull either way. Nothing beyond the notch, whatever the speed."""
     if not notch_active(settings):
         return 0.0
     width = settings.center_notch_deg
     a = abs(deg)
-    if a == 0 or a >= width:
+    if a >= width:
         return 0.0
     core = min(width, max(NOTCH_CORE_MIN_DEG, width * NOTCH_CORE_SHARE))
-    return -math.copysign(min(1.0, a / core), deg)
+    pull = -math.copysign(min(1.0, a / core), deg) if a > 0 else 0.0
+    damping = clamp(settings.center_notch_damping_pct, 0.0, 100.0) / 100.0 * rate_deg_s / NOTCH_DAMP_FULL_DEG_S
+    return clamp(pull - damping, -1.0, 1.0)
 
 
-def notch_level(axis_pct: float, settings: FfbSettings) -> int:
+def notch_level(axis_pct: float, settings: FfbSettings, rate_pct_s: float = 0.0) -> int:
     """The notch's constant-force magnitude (s16, device coordinates) for the steering axis
-    at ``axis_pct`` of its half travel (``InputPublisher.steering_axis_pct``: unsnapped,
-    and already through the profile's invert)."""
-    deg = clamp(axis_pct, -100.0, 100.0) / 100.0 * settings.base_range_deg / 2.0
-    force = notch_force(deg, settings) * clamp(settings.center_notch_pct, 0.0, 100.0) / 100.0
+    at ``axis_pct`` of its half travel, moving ``rate_pct_s`` (``InputPublisher.steering_axis_pct``:
+    unsnapped, and already through the profile's invert)."""
+    half = settings.base_range_deg / 2.0
+    deg = clamp(axis_pct, -100.0, 100.0) / 100.0 * half
+    force = notch_force(deg, settings, rate_pct_s / 100.0 * half) * clamp(settings.center_notch_pct, 0.0, 100.0) / 100.0
     if settings.wheel_invert:
         force = -force  # back to the device's own direction
     return round(NOTCH_SIGN * force * S16_MAX) + 0
