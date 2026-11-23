@@ -387,6 +387,7 @@ class FfbController:
                     self._cnotch_unavailable = True
                     return 0
                 self._cnotch_level, self._cnotch_written_at = level, now
+                self._cnotch_playing = False  # started again with it, in case the base takes a new magnitude only then
             if not self._cnotch_playing or now - self._cnotch_played_at >= model.NOTCH_RENEW_S:
                 self._dev.play(self._cnotch_id, True)
                 self._cnotch_playing, self._cnotch_played_at = True, now

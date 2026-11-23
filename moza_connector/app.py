@@ -25,7 +25,7 @@ from keelson.scaffolding import (
 from keelson.scaffolding.liveliness import declare_liveliness
 from keelson.scaffolding.qos_zenoh import declare_publisher
 
-from . import base_serial
+from . import base_serial, codes
 from . import device as devices
 from . import model, profile as profiles, store
 from .base_serial import BaseSerialError, FakeBaseSerial
@@ -604,14 +604,19 @@ def _run_with_device(
                         _periodic(stop, LIGHTS_HZ, lambda now: lights.sync(helm.settings, ffb.top_alarm(now), now), "lights", on_thread_error)
                     )
 
+                def notch() -> None:
+                    axis = inputs.steering_axis_pct
+                    if axis is not None:
+                        ffb.on_axis(axis, time.monotonic())  # the centre notch
+
                 last_wheel = None
                 while not (shutdown.is_requested() or lost.is_set() or failed.is_set()):
                     try:
                         for ev in dev.events(POLL_S):
                             inputs.handle(ev.type, ev.code, ev.value, time.monotonic())
-                        axis = inputs.steering_axis_pct
-                        if axis is not None:
-                            ffb.on_axis(axis, time.monotonic())  # the centre notch, every pass
+                            if ev.type == codes.EV_SYN:
+                                notch()  # with every report, so it keeps up while the wheel turns
+                        notch()  # and on every pass, so it is renewed while the wheel is still
                         wheel = inputs.steering_value
                         if wheel is not None and wheel != last_wheel:
                             last_wheel = wheel

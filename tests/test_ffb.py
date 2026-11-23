@@ -561,7 +561,7 @@ def notch_settings(**kw):
                        center_mark_pct=0, detent_pct=0, **kw)
 
 
-AT_PEAK = 3.0 / 450 * 100  # the axis 3 deg to starboard on a 900 deg base
+AT_PEAK = 3.0 / 450 * 100  # the axis 3 deg to starboard on a 900 deg base: the full pull
 
 
 def test_no_notch_while_off_or_before_start():
@@ -591,8 +591,11 @@ def test_notch_played_by_the_wheel_loop_renewed_and_stopped_outside():
     c.on_axis(AT_PEAK * 0.999, 0.05 + model.NOTCH_RENEW_S)
     assert dev.ff_log[n:] == [("play", nid, True)]
     # A real move rewrites the magnitude on the same effect.
-    c.on_axis(AT_PEAK / 2, 0.2)
-    assert constants(dev)[-1][:2] == ("constant", nid) and constants(dev)[-1][2] == model.notch_level(AT_PEAK / 2, s)
+    # A real move (into the core) rewrites the magnitude on the same effect, and starts it again.
+    n = len(dev.ff_log)
+    c.on_axis(AT_PEAK / 4, 0.2)
+    assert model.notch_level(AT_PEAK / 4, s) != level
+    assert dev.ff_log[n:] == [("constant", nid, model.notch_level(AT_PEAK / 4, s), model.NOTCH_MS), ("play", nid, True)]
     # Past the notch: stopped, not erased.
     c.on_axis(50.0, 0.3)
     assert dev.ff_log[-1] == ("play", nid, False)

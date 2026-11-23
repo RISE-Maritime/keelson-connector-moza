@@ -103,9 +103,9 @@ class FfbSettings:
     detent_pct: float = 60.0
     #: The centre mark: a distinct pulse each time the wheel reaches centre, 0 for none.
     center_mark_pct: float = 80.0
-    #: The centre notch: within ``center_notch_deg`` of centre the wheel is pulled into it,
-    #: hardest halfway out, so it settles at midship and leaving it is a ridge to push over.
-    #: This strong at its peak, 0 for none. Centre and detent modes; never follow-up.
+    #: The centre notch, a V in a rail: within ``center_notch_deg`` of centre the wheel is
+    #: pulled into it at this strength (easing off only near centre), so it falls into midship
+    #: and leaving takes a push. 0 for none. Centre and detent modes; never follow-up.
     center_notch_pct: float = 0.0
     center_notch_deg: float = 5.0
     #: Wheel degrees either side of centre that order exactly 0: a spring never brings the
@@ -983,6 +983,10 @@ NOTCH_MIN_INTERVAL_S = 0.004
 #: Which way a positive constant force turns the base, in device coordinates: -1 pushes the
 #: axis toward its negative end. Checked on the R21 Ultra by holding the wheel off centre.
 NOTCH_SIGN = -1
+#: The notch's core, where the pull eases to 0 at centre: this share of its width, at least
+#: NOTCH_CORE_MIN_DEG. Outside the core, out to the width, the pull is full.
+NOTCH_CORE_SHARE = 0.25
+NOTCH_CORE_MIN_DEG = 0.3
 
 
 def notch_active(settings: FfbSettings) -> bool:
@@ -993,17 +997,17 @@ def notch_active(settings: FfbSettings) -> bool:
 
 def notch_force(deg: float, settings: FfbSettings) -> float:
     """The notch's pull for the wheel ``deg`` from centre, as a fraction -1..1 of its
-    strength, toward centre (so the opposite sign to ``deg``): growing to the full pull
-    halfway out, falling back to 0 at ``center_notch_deg``, nothing beyond."""
+    strength, toward centre (so the opposite sign to ``deg``). A V in a rail: the full pull
+    all the way from ``center_notch_deg`` in to the notch's core, where it eases to 0 at
+    centre so the wheel settles there instead of buzzing across it; nothing beyond."""
     if not notch_active(settings):
         return 0.0
     width = settings.center_notch_deg
     a = abs(deg)
-    if a >= width:
+    if a == 0 or a >= width:
         return 0.0
-    peak = width / 2.0
-    share = a / peak if a <= peak else (width - a) / peak
-    return -math.copysign(share, deg) if a > 0 else 0.0
+    core = min(width, max(NOTCH_CORE_MIN_DEG, width * NOTCH_CORE_SHARE))
+    return -math.copysign(min(1.0, a / core), deg)
 
 
 def notch_level(axis_pct: float, settings: FfbSettings) -> int:

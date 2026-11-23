@@ -535,15 +535,20 @@ def test_test_pulse_level_is_the_pulses_own_strength():
 # --- The centre notch ---------------------------------------------------------------------
 
 
-def test_notch_pulls_to_centre_hardest_halfway_out_and_nothing_past_it():
+def test_notch_is_a_v_full_pull_in_to_its_core_and_nothing_past_it():
     s = FfbSettings(mode=FfbMode.DETENT, center_notch_pct=50, center_notch_deg=6)
+    core = 6 * model.NOTCH_CORE_SHARE  # 1.5 deg
     assert model.notch_force(0.0, s) == 0.0
-    assert model.notch_force(1.5, s) == pytest.approx(-0.5)  # pulled back to port
-    assert model.notch_force(3.0, s) == pytest.approx(-1.0)  # the peak: the ridge
-    assert model.notch_force(4.5, s) == pytest.approx(-0.5)
+    assert model.notch_force(core / 2, s) == pytest.approx(-0.5)  # easing into centre
+    for deg in (core, 3.0, 5.9):
+        assert model.notch_force(deg, s) == pytest.approx(-1.0)  # the full pull, pulled back to port
     assert model.notch_force(6.0, s) == 0.0 and model.notch_force(40.0, s) == 0.0
-    for deg in (0.7, 2.0, 3.0, 5.2):
+    for deg in (0.5, 1.5, 3.0, 4.5):
         assert model.notch_force(-deg, s) == pytest.approx(-model.notch_force(deg, s))  # odd
+    # A narrow notch keeps a core of at least NOTCH_CORE_MIN_DEG.
+    narrow = replace(s, center_notch_deg=1)
+    assert model.notch_force(model.NOTCH_CORE_MIN_DEG / 2, narrow) == pytest.approx(-0.5)
+    assert model.notch_force(0.5, narrow) == pytest.approx(-1.0)
 
 
 def test_notch_only_when_on_and_never_in_follow_up():
@@ -555,7 +560,7 @@ def test_notch_only_when_on_and_never_in_follow_up():
 
 def test_notch_level_from_the_axis_in_degrees_and_device_coordinates():
     s = FfbSettings(mode=FfbMode.DETENT, base_range_deg=900, center_notch_pct=50, center_notch_deg=6)
-    axis = 3.0 / 450 * 100  # 3 deg to starboard on a 900 deg base: the peak
+    axis = 3.0 / 450 * 100  # 3 deg to starboard on a 900 deg base: the full pull
     level = model.notch_level(axis, s)
     assert level == round(model.NOTCH_SIGN * -0.5 * model.S16_MAX)
     assert model.notch_level(-axis, s) == -level
