@@ -23,6 +23,7 @@ A Moza direct-drive wheelbase (R21 Ultra) as a keelson helm (README). It publish
   - A narrower angle is written only while the wheel is inside it by `BASE_WHEEL_MARGIN_DEG`; wider at once. Never under `BASE_MIN_RANGE_DEG`, never wider than the angle read at start.
   - The angle read at start is put back on every exit (`BaseStop.restore()`, after `FfbController.shutdown()`, never raises). What to put back is saved (`base_restore`) before narrowing, so the next start undoes a crash first.
 - **The lights' own colours always come back, and are never flashed.** The rim's colours and the base bar's colours and mode are stored device settings: read at start, saved (`lights_restore`) before an alarm colour is shown, written once per change, put back when the alarm is over and on every exit (`AlarmLights.restore()`, never raises). `AlarmLights.sync` never raises: a device that stops answering loses its colours, never the helm.
+- **Moza's E-Stop is only listened to.** It is its own serial device (Moza vendor id, product 0x21); `base_serial.find_estop_serial()` finds it and `find_base_serial()` never returns it. Nothing is ever written to it, and its state (`estop.EstopWatch`) is reported, never acted on: the stop is the base's own. Its state is `unknown` until it first changes and `gone` when its port is lost, never a guess. A fake device never reaches for a real E-Stop.
 - **The centre notch ends by itself.** It is a constant force (`model.notch_level`): every play lasts `NOTCH_MS` (under a lease), it is never in the keepalive, and only the loop that reads the wheel (`FfbController.on_axis`) plays it again, never the tick. Never in follow-up mode. Its sign (`NOTCH_SIGN`) is checked on the real base: held off centre, the wheel is pulled back, never pushed away.
 - **A long rumble is several plays.** Every play of the rumble effect is at most `SEGMENT_MAX_MS` (under a lease) and never renewed; a longer symbol is plays back to back.
 - **The fake device is for the tests only.** `--fake-device` and `--base-serial fake` are refused unless `MOZA_CONNECTOR_TESTING=1`.
@@ -48,7 +49,8 @@ A Moza direct-drive wheelbase (R21 Ultra) as a keelson helm (README). It publish
 | `rudder_sim.py` | Slipway's steering gear, mirrored: the rudder order, the rate-limited gear, the dead-man (pure) |
 | `rudder_sim_app.py` | `moza-rudder-sim`: that rudder on the bus, steered by the wheel |
 | `serial_proto.py` | The Moza serial framing for the base's steering angle (pure; pinned to captured frames) |
-| `base_serial.py` | The base's serial port (pyserial, Moza vendor id only), `FakeBaseSerial` |
+| `base_serial.py` | The base's serial port (pyserial, Moza vendor id only), `FakeBaseSerial`; the E-Stop's port (read only), `FakeEstop` |
+| `estop.py` | `EstopWatch`: Moza's E-Stop's state from its own port, reported, never acted on |
 | `base_stop.py` | `BaseStop`: the hard end stop, setting the base's angle to the helm's lock and putting it back |
 | `alarm_lights.py` | `AlarmLights`: the rim's LEDs and the base's light bar in the highest active alarm's colour, their own put back |
 | `store.py` | The settings file: the wheel's setup, the default and your profiles, read at start, written after each remote change (I/O only; the rules are `model.load_state`) |

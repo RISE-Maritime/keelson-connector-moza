@@ -180,7 +180,7 @@ The R21 Ultra peaks at 21 Nm, which is enough to injure a wrist.
 - **Ramp-up:** at start-up, the gain rises from 0 over 2 s. The wheel may be anywhere when the connector starts, and this keeps it from being whipped to centre.
 - **On exit,** whether from SIGTERM, Ctrl-C, an error or the base being unplugged, every effect is stopped and erased and the gain is set to 0. The wheel is left **limp**.
 - **First power-on:** clamp the base down and keep your hands off the rim.
-- **Emergency stop: use Moza's hardware stop (preferred).** Plug Moza's emergency stop into the base's DASH port (RJ11) and set it to **Mode 2**. Pressed, it cuts force feedback at the base: the wheel goes limp while the base stays powered, so its inputs keep publishing and the helm stays live. Released, force feedback resumes by itself. This works in the base's own firmware, whatever this connector or the computer is doing, so it is the stop to reach for. It does not report to moza2keelson: while it is pressed, Crowsnest still shows force feedback as on. Check it on each bench: switch force feedback on, press the stop (the wheel goes limp), release it (the force returns).
+- **Emergency stop: use Moza's hardware stop (preferred).** Plug Moza's emergency stop into the base's DASH port (RJ11) and set it to **Mode 2**. Pressed, it cuts force feedback at the base: the wheel goes limp while the base stays powered, so its inputs keep publishing and the helm stays live. Released, force feedback resumes by itself. This works in the base's own firmware, whatever this connector or the computer is doing, so it is the stop to reach for. Plug its USB cable into the computer too: it then reports each press and release on a serial port of its own (USB product 0x21, "E-Stop"), and moza2keelson (`--estop auto`, the default) shows its state with the force feedback (`estop` in `get_config`: `pressed`, `released`, `unknown` until it first changes, `gone` if its cable is pulled, `off` without one). moza2keelson only listens to it, never writes to it and never acts on it: the stop itself is the base's. Check it on each bench: switch force feedback on, press the stop (the wheel goes limp), release it (the force returns).
 
 ## Testing against a simulated rudder
 
@@ -332,7 +332,7 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
                     [--ffb-alarm-emergency-pct FFB_ALARM_EMERGENCY_PCT]
                     [--ffb-lag-resistance-pct FFB_LAG_RESISTANCE_PCT]
                     [--settings-file SETTINGS_FILE]
-                    [--base-serial BASE_SERIAL] [--ffb-remote]
+                    [--base-serial BASE_SERIAL] [--estop ESTOP] [--ffb-remote]
 ```
 
 Run `moza2keelson --help` for the full list of options and their defaults.

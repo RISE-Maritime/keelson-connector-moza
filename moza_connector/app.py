@@ -28,7 +28,8 @@ from keelson.scaffolding.qos_zenoh import declare_publisher
 from . import base_serial, codes
 from . import device as devices
 from . import model, profile as profiles, store
-from .base_serial import BaseSerialError, FakeBaseSerial
+from .base_serial import BaseSerialError, FakeBaseSerial, FakeEstop
+from .estop import EstopWatch
 from .base_stop import BaseStop
 from .alarm_lights import PREVIEW_TAIL_S, AlarmLights
 from .device import DeviceGone, FakeDevice, MozaDevice
@@ -187,6 +188,13 @@ def parser() -> argparse.ArgumentParser:
         "touches it. Pit House must be closed",
     )
     f.add_argument(
+        "--estop",
+        default="auto",
+        help="Moza's E-Stop on its own USB port, only read (it cuts force feedback in the base itself): its "
+        "state is shown with the force feedback. 'auto' finds it by its USB ids, or a port path; 'none' "
+        "ignores it",
+    )
+    f.add_argument(
         "--ffb-remote",
         action="store_true",
         help="Let configurable/v1 (Crowsnest) switch force feedback and tune it, never above --ffb-max-gain-pct. "
@@ -202,6 +210,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error(f"--fake-device is for the tests only (set {TESTING_ENV}=1)")
     if args.base_serial == "fake" and os.environ.get(TESTING_ENV) != "1":
         p.error(f"--base-serial fake is for the tests only (set {TESTING_ENV}=1)")
+    if args.estop == "fake" and os.environ.get(TESTING_ENV) != "1":
+        p.error(f"--estop fake is for the tests only (set {TESTING_ENV}=1)")
     if args.device and devices.resolve_backend(args.backend) != "evdev":
         p.error("--device names an evdev node: it needs --backend evdev")
     if args.axis_min_hz < 0 or args.axis_max_hz < 0:
@@ -244,6 +254,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ):
         p.error("--center-deadband-deg must be 0..30 and under half of --wheel-lock-deg")
     return args
+
+
+def open_estop(args):
+    """Moza's E-Stop's watch, or None (none asked for, or none found)."""
+    if args.estop == "none":
+        return None
+    if args.estop == "fake":
+        return EstopWatch(FakeEstop())
+    if args.fake_device and args.estop == "auto":
+        return None  # a scripted base never reaches for a real E-Stop
+    path = base_serial.find_estop_serial() if args.estop == "auto" else args.estop
+    if path is None:
+        log.info("No Moza E-Stop found: its state is not shown")
+        return None
+    try:
+        watch = EstopWatch(base_serial.EstopSerial(path))
+    except (BaseSerialError, OSError, ImportError) as e:
+        log.warning("--estop %s: %s; its state is not shown", args.estop, e)
+        return None
+    log.info("Moza E-Stop on %s: its state is shown (unknown until it changes)", path)
+    return watch
 
 
 def open_base_serial(args):
@@ -383,6 +414,7 @@ def _run_with_device(
             lights_restore = restore
             save()
 
+        estop = open_estop(args)
         base_stop = None
         try:
             port = open_base_serial(args)
@@ -533,6 +565,8 @@ def _run_with_device(
                     "rim_leds": lights.status["rim"] if lights is not None else "off",
                     "base_light": lights.status["base"] if lights is not None else "off",
                     "alarm_active": model.alarm_kind(ffb.top_alarm(time.monotonic()) or 0),
+                    # Moza's E-Stop: pressed, released, unknown (not changed since start), gone, or off.
+                    "estop": estop.state if estop is not None else "off",
                     **({} if "rim" in lit else {"alarm_leds": False}),
                     **({} if "base" in lit else {"alarm_base_light": False}),
                 }
@@ -546,7 +580,7 @@ def _run_with_device(
                 nonlocal helm
                 if not isinstance(patch, dict):
                     raise ValueError("set_config expects a JSON object")
-                moving = ("active", "spring_source", "base_serial", "base_angle_deg", "base_range_deg", "rim_leds", "base_light", "alarm_active")
+                moving = ("active", "spring_source", "base_serial", "base_angle_deg", "base_range_deg", "rim_leds", "base_light", "alarm_active", "estop")
                 current = read_only()
                 fixed = {k: v for k, v in current.items() if k not in moving}
                 if base_stop is not None and "base_range_deg" in patch and patch["base_range_deg"] != current["base_range_deg"]:
@@ -605,6 +639,10 @@ def _run_with_device(
                     threads.append(_periodic(stop, args.axis_min_hz, inputs.backstop, "axis-backstop", on_thread_error))
                 if ffb.active or remote:
                     threads.append(_periodic(stop, FFB_HZ, ffb.tick, "ffb", on_thread_error))
+                if estop is not None:
+                    t = threading.Thread(target=estop.run, args=(stop,), name="estop", daemon=True)
+                    t.start()
+                    threads.append(t)
                 if lights is not None:
                     threads.append(
                         _periodic(stop, LIGHTS_HZ, lambda now: lights.sync(helm.settings, ffb.top_alarm(now), now), "lights", on_thread_error)
@@ -640,6 +678,8 @@ def _run_with_device(
                 for t in threads:
                     t.join(timeout=2.0)
                 ffb.shutdown()
+                if estop is not None:
+                    estop.close()
                 for sub in subscribers:
                     sub.undeclare()
     if lost.is_set():

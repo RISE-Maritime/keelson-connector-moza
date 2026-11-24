@@ -155,3 +155,43 @@ def angle_value(range_deg: float) -> int:
 def range_deg(value: int) -> float:
     """The steering angle lock to lock for the base's value."""
     return 2.0 * value
+
+
+# --- The emergency stop -------------------------------------------------------------------
+#
+# Moza's E-Stop (USB product 0x21, "E-Stop") is a serial device of its own. It sends, unasked, a
+# frame each time it changes, three times over; the value byte is 1 pressed, 0 released (checked on
+# the bench, 2026-11-24: 7e 02 46 21 00 01 f5 pressed, 7e 02 46 21 00 00 f4 released). Nothing is
+# ever written to it.
+
+ESTOP_PID = 0x21
+ESTOP_GROUP = 0x46
+ESTOP_DEVICE = 0x21
+_ESTOP_HEAD = bytes((START, 2, ESTOP_GROUP, ESTOP_DEVICE, 0))
+
+
+def estop_frame(pressed: bool) -> bytes:
+    """The frame the E-Stop sends for a state (for the tests and the fake)."""
+    head = _ESTOP_HEAD + bytes((1 if pressed else 0,))
+    return head + bytes((checksum(head),))
+
+
+def estop_states(buf: bytes) -> tuple[list[bool], bytes]:
+    """Every state in ``buf`` (True pressed), in order, and the bytes after the last whole frame
+    (a frame may be split between reads). A frame with a wrong checksum or value is skipped."""
+    states: list[bool] = []
+    i = 0
+    while True:
+        j = buf.find(_ESTOP_HEAD, i)
+        if j < 0:
+            # Keep a tail that could be the start of a frame.
+            keep = max(i, len(buf) - (len(_ESTOP_HEAD) + 1))
+            k = buf.find(bytes((START,)), keep)
+            return states, (buf[k:] if k >= 0 else b"")
+        if j + len(_ESTOP_HEAD) + 2 > len(buf):
+            return states, buf[j:]
+        value = buf[j + len(_ESTOP_HEAD)]
+        cs = buf[j + len(_ESTOP_HEAD) + 1]
+        if value in (0, 1) and cs == checksum(buf[j : j + len(_ESTOP_HEAD) + 1]):
+            states.append(value == 1)
+        i = j + len(_ESTOP_HEAD) + 2

@@ -116,7 +116,7 @@ class Harness:
         )
         self.proc = subprocess.Popen(
             [sys.executable, str(ROOT / "bin/moza2keelson.py"), "-r", REALM, "-e", V, "--zenoh-config", str(zcfg),
-             "--fake-device", str(script), *extra],
+             "--fake-device", str(script), "--estop", "fake", *extra],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -454,6 +454,8 @@ def test_an_alarm_colours_the_rim_until_acknowledged(h, monkeypatch):
     wait(lambda: any(r.ok for r in h.session.get(key, timeout=0.5)), what="configurable/v1")
     assert json.loads(rpc(h, "get_config")[1])["rim_leds"] == "ready"
     assert json.loads(rpc(h, "get_config")[1])["base_light"] == "ready"
+    # Moza's E-Stop: listened to, its state unknown until it first changes.
+    assert json.loads(rpc(h, "get_config")[1])["estop"] == "unknown"
     assert rpc(h, "set_config", json.dumps({"alarm_leds": True, "alarm_base_light": True, "alarm_warning_color": "#ff8800",
                                             "alarm_fire_color": "#ff00aa"}).encode())[0]
     pub = h.session.declare_publisher(f"{BASE}/alarm/test/cpa")

@@ -27,13 +27,72 @@ class BaseSerialError(RuntimeError):
 
 
 def find_base_serial() -> str | None:
-    """The serial port of a Moza base on this machine, or None."""
+    """The serial port of a Moza base on this machine, or None (never the E-Stop's, which is a
+    Moza device too)."""
     from serial.tools import list_ports  # the edge: only here
 
     for port in list_ports.comports():
-        if port.vid == MOZA_VID:
+        if port.vid == MOZA_VID and port.pid != proto.ESTOP_PID:
             return port.device
     return None
+
+
+def find_estop_serial() -> str | None:
+    """The serial port of a Moza E-Stop on this machine, or None."""
+    from serial.tools import list_ports
+
+    for port in list_ports.comports():
+        if port.vid == MOZA_VID and port.pid == proto.ESTOP_PID:
+            return port.device
+    return None
+
+
+class EstopSerial:
+    """A Moza E-Stop's serial port, only ever read: ``read()`` returns what has arrived."""
+
+    def __init__(self, path: str):
+        import serial
+
+        if not is_moza(path):
+            raise BaseSerialError(f"{path} is not a Moza device's serial port")
+        self.path = path
+        self._port = serial.Serial(path, 115200, timeout=0.2)
+
+    def read(self) -> bytes:
+        return self._port.read(256)
+
+    def close(self) -> None:
+        try:
+            self._port.close()
+        except Exception as e:
+            log.debug("Closing %s: %s", self.path, e)
+
+
+class FakeEstop:
+    """An E-Stop in memory, for the tests: ``press()``/``release()`` queue its frames; ``gone``
+    makes reads fail."""
+
+    def __init__(self):
+        self.path = "fake"
+        self._out = b""
+        self.gone = False
+
+    def press(self) -> None:
+        self._out += proto.estop_frame(True) * 3
+
+    def release(self) -> None:
+        self._out += proto.estop_frame(False) * 3
+
+    def read(self) -> bytes:
+        if self.gone:
+            raise OSError("the fake E-Stop is gone")
+        out, self._out = self._out, b""
+        if not out:
+            time.sleep(0.01)
+        return out
+
+    def close(self) -> None:
+        pass
 
 
 def is_moza(path: str) -> bool:
