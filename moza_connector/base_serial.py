@@ -129,7 +129,13 @@ class BaseSerial:
         raise BaseSerialError(f"no reply to {name}")
 
     def read(self, name: str) -> int:
-        return self._ask(proto.read_request(name), name, False)
+        """A field's value. A read the device does not answer is asked once more, as a write is
+        (the rim now and then drops one reply among its LEDs')."""
+        try:
+            return self._ask(proto.read_request(name), name, False)
+        except BaseSerialError:
+            log.debug("No reply to reading %s: asking again", name)
+            return self._ask(proto.read_request(name), name, False)
 
     def write(self, name: str, value: int, *, verify: bool = True) -> int:
         """Write and, with ``verify``, read it back. A write the device does not answer is sent
