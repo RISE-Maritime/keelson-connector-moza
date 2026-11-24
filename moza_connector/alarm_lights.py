@@ -122,6 +122,32 @@ class AlarmLights:
             if all(c is None for c in self._shown.values()):
                 self._persist_none_once()
 
+    def colors(self) -> dict:
+        """What each LED shows now, its own colour or the alarm colour showing instead, as
+        "#rrggbb": ``{"rim": {"rpm": [10], "buttons": [10]}, "base": [[9], [9]]}``. A target without
+        lights is left out. Reads only what is held here; never raises."""
+        try:
+            with self._lock:
+                hexed = lambda v: f"#{int(v) & 0xFFFFFF:06x}"  # noqa: E731
+                out: dict = {}
+                for target, own in self._own.items():
+                    shown = self._shown.get(target)
+                    value = (lambda n: shown) if shown is not None else own.get
+                    if target == "rim":
+                        out["rim"] = {
+                            "rpm": [hexed(value(f"rpm-color{i + 1}")) for i in range(proto.RPM_LEDS)],
+                            "buttons": [hexed(value(f"button-color{i + 1}")) for i in range(proto.BUTTON_LEDS)],
+                        }
+                    elif target == "base":
+                        out["base"] = [
+                            [hexed(value(f"base-color{s}-{led}")) for led in range(proto.BASE_STRIP_LEDS)]
+                            for s in range(proto.BASE_STRIPS)
+                        ]
+                return out
+        except Exception as e:  # the colours are a picture: never let them stop the helm
+            log.debug("Light colours: %s", e)
+            return {}
+
     def _all_own(self) -> dict[str, int]:
         return {n: v for own in self._own.values() for n, v in own.items()}
 

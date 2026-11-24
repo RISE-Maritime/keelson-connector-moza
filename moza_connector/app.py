@@ -567,6 +567,8 @@ def _run_with_device(
                     "alarm_active": model.alarm_kind(ffb.top_alarm(time.monotonic()) or 0),
                     # Moza's E-Stop: pressed, released, unknown (not changed since start), gone, or off.
                     "estop": estop.state if estop is not None else "off",
+                    # What every LED of the rim and the base's light bar shows now ("#rrggbb").
+                    "lights": lights.colors() if lights is not None else {},
                     **({} if "rim" in lit else {"alarm_leds": False}),
                     **({} if "base" in lit else {"alarm_base_light": False}),
                 }
@@ -580,7 +582,7 @@ def _run_with_device(
                 nonlocal helm
                 if not isinstance(patch, dict):
                     raise ValueError("set_config expects a JSON object")
-                moving = ("active", "spring_source", "base_serial", "base_angle_deg", "base_range_deg", "rim_leds", "base_light", "alarm_active", "estop")
+                moving = ("active", "spring_source", "base_serial", "base_angle_deg", "base_range_deg", "rim_leds", "base_light", "alarm_active", "estop", "lights")
                 current = read_only()
                 fixed = {k: v for k, v in current.items() if k not in moving}
                 if base_stop is not None and "base_range_deg" in patch and patch["base_range_deg"] != current["base_range_deg"]:

@@ -1,7 +1,7 @@
 """The wheel's lights in an alarm's colour (the rim's LEDs, the base's light bar), with a fake
 base, rim and main controller."""
 
-from moza_connector import serial_proto as proto
+from moza_connector import model, serial_proto as proto
 from moza_connector.alarm_lights import ALL_NAMES, AlarmLights, valid_restore
 from moza_connector.base_serial import FakeBaseSerial
 from moza_connector.model import ALARM_RANKS, FfbSettings
@@ -103,3 +103,19 @@ def test_a_gone_device_never_raises_waits_and_a_dead_runs_colours_come_back():
     lights_with(left, saved[-1])
     assert rim(left) == {OWN} and bar(left) == {OWN}
     assert valid_restore({"limit": 1}) is None and valid_restore({"rpm-color1": 5, "x": 1}) == {"rpm-color1": 5}
+
+
+def test_colors_report_what_each_led_shows():
+    base = FakeBaseSerial()
+    lights = AlarmLights(base)
+    lights.start(None)
+    own = lights.colors()
+    assert len(own["rim"]["rpm"]) == 10 and len(own["rim"]["buttons"]) == 10
+    assert [len(s) for s in own["base"]] == [9, 9]
+    assert own["rim"]["rpm"][0] == "#56f7fc"
+    s = FfbSettings(alarm_leds=True, alarm_base_light=True)
+    lights.sync(s, model.ALARM_RANKS["warning"], 0.0)
+    shown = lights.colors()
+    assert set(shown["rim"]["rpm"]) == {f"#{model.alarm_light_color(s, model.ALARM_RANKS['warning'], 'rim') & 0xFFFFFF:06x}"}
+    lights.sync(s, None, 1.0)
+    assert lights.colors() == own

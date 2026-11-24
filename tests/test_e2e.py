@@ -456,6 +456,8 @@ def test_an_alarm_colours_the_rim_until_acknowledged(h, monkeypatch):
     assert json.loads(rpc(h, "get_config")[1])["base_light"] == "ready"
     # Moza's E-Stop: listened to, its state unknown until it first changes.
     assert json.loads(rpc(h, "get_config")[1])["estop"] == "unknown"
+    lights = json.loads(rpc(h, "get_config")[1])["lights"]
+    assert len(lights["rim"]["rpm"]) == 10 and [len(s) for s in lights["base"]] == [9, 9]
     assert rpc(h, "set_config", json.dumps({"alarm_leds": True, "alarm_base_light": True, "alarm_warning_color": "#ff8800",
                                             "alarm_fire_color": "#ff00aa"}).encode())[0]
     pub = h.session.declare_publisher(f"{BASE}/alarm/test/cpa")
