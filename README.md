@@ -1,8 +1,95 @@
 # keelson-connector-moza
 
-A Moza direct-drive wheelbase as a keelson **helm**. The connector puts the wheel, any pedals connected to the base, and the buttons onto the bus. It also gives the operator **rudder follow-up** as force feedback: the wheel is pulled toward the position that matches where the rudder actually is.
+A Moza direct-drive wheelbase as a [keelson](https://github.com/RISE-Maritime/keelson) **helm**: the wheel, any pedals on the base and the rim's buttons go onto the bus, and the wheel's force feedback can follow the real rudder, centre itself, or click through rudder steps.
 
-It is built and tested for the **R21 Ultra**. The R16 and R21 have the same USB IDs (`346e:0000`, `346e:0010`), so the bundled profile should cover them too.
+Built and tested on the **R21 Ultra** with a CS V2P rim. The R16 and R21 share its USB ids (`346e:0000`, `346e:0010`), so the bundled profile should cover them too. Linux (kernel driver, `evdev`) and macOS (direct USB HID) are both supported.
+
+What it does:
+- **Publishes** the wheel (`wheel_position_pct`), pedals and every button on existing keelson subjects, with a backstop so silence always means stop.
+- **Force feedback:** rudder follow-up, centring, detent clicks, a centre notch, end stops, haptic warnings and alarm rumbles, all under a hard gain ceiling.
+- **Remote control** over keelson's `configurable/v1` (opt-in), with saved profiles.
+- **The base's own hardware**, over its serial port (opt-in): a firm hard end stop, alarm colours on the rim and light bar, and Moza's E-Stop state.
+- **`moza-rudder-sim`**, a simulated steering gear to test against.
+
+It never takes control authority: it publishes operator input, and who holds the conn is decided elsewhere.
+
+## Safety
+
+The R21 Ultra peaks at 21 Nm, which is enough to injure a wrist.
+
+- **Gain:** the overall gain defaults to `--ffb-max-gain-pct 30`. A **hard ceiling of 60 %** is enforced in code, and the CLI refuses any value above it.
+- **Ramp-up:** at start-up, the gain rises from 0 over 2 s. The wheel may be anywhere when the connector starts, and this keeps it from being whipped to centre.
+- **On exit,** whether from SIGTERM, Ctrl-C, an error or the base being unplugged, every effect is stopped and erased and the gain is set to 0. The wheel is left **limp**.
+- **First power-on:** clamp the base down and keep your hands off the rim.
+- **Fit a hardware emergency stop.** See [Emergency stop](#emergency-stop).
+
+## Requirements
+
+- **Linux** (`--backend evdev`, the default there): kernel ≥ 6.15, or 6.12.24+, 6.13.12+ or 6.14.3+. These kernels ship `hid-universal-pidff`, the in-tree driver for Moza force feedback.
+- **macOS** (`--backend hid`, the default there): the connector talks to the base directly over USB HID through hidapi, natively. Docker Desktop can't pass USB through. See [How macOS works](#how-macos-works).
+- **Set the physical rotation range on the base**, using Pit House or [Boxflat](https://github.com/Lawstorant/boxflat). The connector normalises over whatever range the base reports, so ±100 % is always full lock.
+
+## Quick start
+
+Quit Pit House first: the connector needs the base to itself. Replace `<entity>` with your keelson entity id, and `tcp/localhost:7447` with your Zenoh router.
+
+**Linux, in Docker.** Edit the entity in [`docker-compose.moza.yml`](docker-compose.moza.yml), install the udev rule once (see [First run on a new base](#first-run-on-a-new-base-linux)), then:
+
+```bash
+docker compose -f docker-compose.moza.yml up -d
+```
+
+The container restarts when the base is unplugged and plugged back in.
+
+**macOS, in Terminal.** Docker Desktop can't reach USB devices on a Mac, so the connector runs natively. Once, in the cloned repo:
+
+```bash
+uv sync --locked
+```
+
+The wheel, restarting by itself 3 s after the base drops off USB, so replugging or powering the base back on brings it back (Ctrl-C to stop):
+
+```bash
+while true; do .venv/bin/moza2keelson --mode client --connect tcp/localhost:7447 -e <entity> -p r21-ultra-no-pedals --ffb-remote --ffb-max-gain-pct 15 --base-serial auto; echo "moza2keelson exited ($?), restarting in 3 s"; sleep 3; done
+```
+
+Optionally, in a second tab, a simulated rudder for the wheel to steer and follow:
+
+```bash
+.venv/bin/moza-rudder-sim --mode client --connect tcp/localhost:7447 -e <entity> --hull road-ferry-78m
+```
+
+Force feedback starts **off**; switch it on from a `configurable/v1` client such as Crowsnest. Ctrl-C leaves the wheel limp and puts the base's own angle and lights back. To run it as a background service instead, see [Keep it running on macOS](#keep-it-running-on-macos).
+
+## First run on a new base (Linux)
+
+```bash
+lsusb | grep -i 346e                  # 346e:0000 or 346e:0010
+sudo evtest                           # pick "... MOZA R21 Ultra Base"; turn the wheel and press the pedals
+```
+
+Check that `ABS_X` moves with the wheel and that the pedals move `ABS_Z` and `ABS_RZ`. Note which button numbers you want to name. If anything differs, copy the profile and adjust it.
+
+```bash
+sudo cp udev/99-moza.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+moza2keelson -e <entity> --ffb off                                  # 1. inputs only
+moza2keelson -e <entity> --ffb center --ffb-max-gain-pct 10         # 2. gentle centring; Ctrl-C leaves it limp
+moza2keelson -e <entity> --ffb follow-up --ffb-rudder-max-deg 35    # 3. follow-up
+```
+
+On macOS the same three steps run as `.venv/bin/moza2keelson -e <entity> -p r21-ultra-no-pedals …`, with no udev rule; the connector logs the axes and buttons it found.
+
+## Keep it running on macOS
+
+The connector exits when the base drops off USB (code 3), by design. On Linux the container's restart policy brings it back; on macOS a LaunchAgent does:
+
+```bash
+scripts/install-macos-agents.sh -e <entity> --with-sim     # connector (--ffb-remote, no pedals) and the rudder sim
+scripts/install-macos-agents.sh -e <entity> -- -p r21-ultra --ffb-remote --ffb-max-gain-pct 20   # your own flags
+scripts/install-macos-agents.sh --uninstall
+```
+
+macOS asks the first time a background service reads `~/Documents` or a USB input device: if the agent sits silent with an empty log, allow it under System Settings → Privacy & Security (Files and Folders, Input Monitoring), or keep the repo outside `~/Documents`. launchd restarts a program that fails (exit 3 or 1) after 3 s, but not one stopped cleanly. Logs go to `~/Library/Logs/moza2keelson.log` and `~/Library/Logs/moza-rudder-sim.log`.
 
 ## What it publishes
 
@@ -21,7 +108,7 @@ How it publishes:
 - **When the base disappears**, the connector stops publishing and exits with code **3**, so the helm goes silent and the restart policy brings it back.
 - **The mapping** comes from a profile, [`moza_connector/profiles/r21-ultra.yaml`](moza_connector/profiles/r21-ultra.yaml). Copy it and pass `-p path.yaml` to rename buttons or remap axes. **Without pedals, use `-p r21-ultra-no-pedals`.** The base reports its pedal axes even when nothing is plugged in, parked at their minimum, so `r21-ultra` would publish a steady 0 % throttle and brake from pedals that don't exist.
 - **Button numbers:** `btn_<n>` is HID Button n+1, the same physical button on Linux and macOS.
-- **Liveliness:** the connector declares a source token for `moza_r21` and a token for each subject. It serves no RPC, except `configurable/v1` under `--ffb-remote` (see [From Crowsnest](#from-crowsnest---ffb-remote)).
+- **Liveliness:** the connector declares a source token for `moza_r21` and a token for each subject. It serves no RPC, except `configurable/v1` under `--ffb-remote` (see [Remote control](#remote-control---ffb-remote)).
 
 Wiring `wheel_position_pct/moza_r21/wheel` to a vehicle is the consumer's job; for example, `vehicle_control/v1 set_control_mapping` on mavlink2keelson. **This connector never takes control authority.** Who holds the conn is decided elsewhere.
 
@@ -40,7 +127,7 @@ Wiring `wheel_position_pct/moza_r21/wheel` to a vehicle is the consumer's job; f
 - **Centring boost** (`--ffb-spring-boost`, 1–3, default 1): stacks that many centring springs, each with its share of the saturation, so the pull near centre is that many times steeper while the pull far from centre is unchanged. The wheel settles closer to centre.
 - **The strongest lever** is still a smaller steering angle on the base in Pit House, or a higher gain cap, since the pull per degree scales with both.
 
-**Haptics.** Four more ways the wheel speaks, each off until set (`--ffb-…` flags, or the panel's Haptics group). They work in every mode while force feedback is on, and none is ever renewed or longer than a lease.
+**Haptics.** Four more ways the wheel speaks, each off until set (`--ffb-…` flags, or remotely, see [Remote control](#remote-control---ffb-remote)). They work in every mode while force feedback is on, and none is ever renewed or longer than a lease.
 
 | Haptic | Setting | What the helmsman feels |
 |---|---|---|
@@ -84,9 +171,9 @@ A handlebar (`jetski`) or any short lock feels stiffest with a small steering an
 
 The full lock of a profile is pulled in to fit the base: `ship`, `hydraulic` and `follow-rudder` use the base's whole range, and `car` 450° where the base has it.
 
-### From Crowsnest (`--ffb-remote`)
+### Remote control (`--ffb-remote`)
 
-With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its source id (`moza_r21`). Crowsnest's "Force feedback test" panel uses it to switch force feedback on and off and to tune it while the connector runs.
+With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its source id (`moza_r21`), so force feedback can be switched on and off and tuned while it runs. Crowsnest (RISE's operator interface) is one client, on its Force feedback tab.
 
 - **Starts off.** Force feedback is off at start-up, whatever `--ffb` says, until someone switches it on.
 - **The command line sets the cap.** A remote gain can't exceed `--ffb-max-gain-pct`, which can't exceed the 60 % ceiling. A higher request is refused with an error reply, not clipped.
@@ -107,7 +194,7 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `modified` | no | the selected profile's keys that differ from it as saved |
 | `revert` | action | `true`: drops the unsaved changes |
 | `save_profile` | action | `true`: saves the changes into the selected profile; yours only, not a built-in |
-| `save_profile_as` | action | `"Rivo bridge"`: a new profile of yours from the current values, then selected |
+| `save_profile_as` | action | `"Bridge"`: a new profile of yours from the current values, then selected |
 | `delete_profile` | action | one of your profiles; the selected or default one falls back to `ship` |
 | `hard_stop` | yes (with `--base-serial`) | `true` / `false`: the base's own steering angle set to the helm's lock |
 | `base_serial`, `base_angle_deg`, `base_max_deg` | no | the hard stop's state (`off`, `base at 900°`, `hard stop at ±90°`, `waiting: …`, `error: …`); the base's angle now and its own |
@@ -136,6 +223,8 @@ With `--ffb-remote`, the connector serves keelson's `configurable/v1` on its sou
 | `lag_resistance_pct` | yes | 0 … 100 (0: off) |
 | `gain_cap_pct`, `ceiling_pct`, `has_ff`, `backend` | no | the cap, 60, whether the base has force feedback, `hid` / `evdev` |
 | `active`, `spring_source` | no | force feedback on the wheel; `center`, `rudder` or `off` |
+| `estop` | no | Moza's E-Stop (`--estop`): `pressed`, `released`, `unknown` until it first changes, `gone` if its cable is pulled, `off` without one. See [Emergency stop](#emergency-stop) |
+| `lights` | no | what every LED shows now, as `#rrggbb`: `{"rim": {"rpm": [10], "buttons": [10]}, "base": [[9], [9]]}`; `{}` without `--base-serial` |
 
 Every change is republished on `configuration_json/moza_r21`.
 
@@ -146,7 +235,7 @@ Every change is republished on `configuration_json/moza_r21`.
 - A file from before profiles is read too: its saved behaviours become profiles, and its tuned settings become the profile "Restored settings", made the default.
 
 ```bash
-.venv/bin/moza2keelson -e <vessel_id> -p r21-ultra-no-pedals --ffb-remote --ffb-max-gain-pct 15
+.venv/bin/moza2keelson -e <entity> -p r21-ultra-no-pedals --ffb-remote --ffb-max-gain-pct 15
 ```
 
 ### Helm range and end stop
@@ -162,25 +251,22 @@ By default, ±100 % on `wheel_position_pct` is the base's own end, which on a si
 
 The software end stop is a spring: its pull grows with how far past lock the wheel goes, measured against the base's whole range, and it is scaled by the gain cap. At 15 % gain on a 900° base it is soft. The base's own steering-angle stop is far firmer and not limited by the gain, so with `--base-serial auto` the connector can move it to full helm lock:
 
-- **Switch it on** with `hard_stop` (Crowsnest's Wheel setup). The base's steering angle becomes twice the helm's lock (at least 90°), so its own stop sits at full lock. It follows every lock change, including a profile switch.
+- **Switch it on** with `hard_stop` (Crowsnest: Force feedback → Wheel setup). The base's steering angle becomes twice the helm's lock (at least 90°), so its own stop sits at full lock. It follows every lock change, including a profile switch.
 - **Never narrower than the wheel:** a narrower angle is set only while the wheel is at least 5° inside it; until then `base_serial` says "waiting: turn the wheel within ±X°" and the software stop holds. Wider is set at once.
 - **Put back on exit:** the angle read at start (Pit House's) is put back on every exit. If the process dies, the next start puts it back first (the settings file keeps `base_restore`).
 - **The base's range is read, not typed:** `base_range_deg` follows the base and can't be set by hand. `base_max_deg` is the base's own angle.
 - **Only the steering angle is ever written** (`limit`, `max-angle`), never the torque or the FFB strength. The port is used only when its USB vendor id is Moza's. Quit Pit House first.
 
-The serial framing was written from Boxflat's protocol notes (no code copied) and checked against an R21 Ultra.
 
 The rudder is assumed to report **positive to starboard**, the same as `wheel_position_pct`. If yours reports positive to port, pass `--ffb-rudder-invert`.
 
-### Safety
+## Emergency stop
 
-The R21 Ultra peaks at 21 Nm, which is enough to injure a wrist.
+Use **Moza's hardware E-Stop**. Plug it into the base's DASH port (RJ11) and set it to **Mode 2**. Pressed, it cuts force feedback in the base itself: the wheel goes limp while the base stays powered, so its inputs keep publishing and the helm stays live. Released, force feedback resumes. It works in the base's firmware whatever this connector or the computer is doing, so it is the stop to reach for.
 
-- **Gain:** the overall gain defaults to `--ffb-max-gain-pct 30`. A **hard ceiling of 60 %** is enforced in code, and the CLI refuses any value above it.
-- **Ramp-up:** at start-up, the gain rises from 0 over 2 s. The wheel may be anywhere when the connector starts, and this keeps it from being whipped to centre.
-- **On exit,** whether from SIGTERM, Ctrl-C, an error or the base being unplugged, every effect is stopped and erased and the gain is set to 0. The wheel is left **limp**.
-- **First power-on:** clamp the base down and keep your hands off the rim.
-- **Emergency stop: use Moza's hardware stop (preferred).** Plug Moza's emergency stop into the base's DASH port (RJ11) and set it to **Mode 2**. Pressed, it cuts force feedback at the base: the wheel goes limp while the base stays powered, so its inputs keep publishing and the helm stays live. Released, force feedback resumes by itself. This works in the base's own firmware, whatever this connector or the computer is doing, so it is the stop to reach for. Plug its USB cable into the computer too: it then reports each press and release on a serial port of its own (USB product 0x21, "E-Stop"), and moza2keelson (`--estop auto`, the default) shows its state with the force feedback (`estop` in `get_config`; `lights` there is what every rim LED and the base's light bar shows now, as `#rrggbb`: `pressed`, `released`, `unknown` until it first changes, `gone` if its cable is pulled, `off` without one). moza2keelson only listens to it, never writes to it and never acts on it: the stop itself is the base's. Check it on each bench: switch force feedback on, press the stop (the wheel goes limp), release it (the force returns).
+Plug the E-Stop's USB cable into the computer too: it then reports each press and release on a serial port of its own (USB product `0x21`, "E-Stop"). moza2keelson finds it (`--estop auto`, the default; a port path, or `none`) and reports its state as `estop` in `get_config`. It only listens: it never writes to the E-Stop and never acts on it. The state is `unknown` until the stop is first pressed or released, because the E-Stop reports only changes.
+
+Check it on each new setup: switch force feedback on, press the stop (the wheel goes limp), release it (the force returns).
 
 ## Testing against a simulated rudder
 
@@ -200,7 +286,7 @@ The R21 Ultra peaks at 21 Nm, which is enough to injure a wrist.
 
 `--max-rudder-deg` and `--rudder-rate-degps` override the hull.
 
-**From Crowsnest.** The sim serves `configurable/v1` as `rudder_sim`, so its section in the Force feedback test panel can change it while it runs:
+**Remote control.** The sim serves `configurable/v1` as `rudder_sim`, so it can be changed while it runs (Crowsnest shows it on the wheel's Diagnostics tab):
 - `hull` (one of the table's), or `max_rudder_deg` / `rudder_rate_degps` by hand (the hull then reads `custom`). A rudder past a shorter travel ends on its stop.
 - `fault`, for training the helmsman's reaction:
 
@@ -214,36 +300,14 @@ The R21 Ultra peaks at 21 Nm, which is enough to injure a wrist.
 `get_config` also returns `hulls`, `faults` and the rudder's angle now (`rudder_deg`). The hull and fault are not remembered between runs: the sim always starts healthy.
 
 ```bash
-.venv/bin/moza-rudder-sim --mode client --connect tcp/localhost:7447 -e <vessel_id> --hull road-ferry-78m
+.venv/bin/moza-rudder-sim --mode client --connect tcp/localhost:7447 -e <entity> --hull road-ferry-78m
 ```
 
 - **Match the wheel to the hull.** Set the wheel's "Rudder at full lock" (`rudder_max_deg`) to the hull's travel: 35 for the ferry, 30 for the others.
-- **One rudder at a time.** Switch Crowsnest's "Rudder test signal" off, or the wheel follows two rudders. Or start the wheel with `--ffb-source rudder_sim`.
+- **One rudder at a time.** Stop any other rudder source on the entity (Crowsnest's "Rudder test signal", say), or the wheel follows two rudders. Or start the wheel with `--ffb-source rudder_sim`.
 - **The real kernel can be the rudder too.** Map `wheel_position_pct/moza_r21/wheel` with `vehicle_control/v1 set_control_mapping` in an L1/L2 scenario in commanded mode. L0 has no steering gear.
 
-## Requirements
-
-- **Linux** (`--backend evdev`, the default there): kernel ≥ 6.15, or 6.12.24+, 6.13.12+ or 6.14.3+. These kernels ship `hid-universal-pidff`, the in-tree driver for Moza force feedback.
-- **macOS** (`--backend hid`, the default there): the connector talks to the base directly over USB HID through hidapi, natively. Docker Desktop can't pass USB through. See [macOS](#macos).
-- **Set the physical rotation range on the base**, using Pit House or [Boxflat](https://github.com/Lawstorant/boxflat). The connector normalises over whatever range the base reports, so ±100 % is always full lock.
-
-## First run on a new base
-
-```bash
-lsusb | grep -i 346e                  # 346e:0000 or 346e:0010
-sudo evtest                           # pick "... MOZA R21 Ultra Base"; turn the wheel and press the pedals
-```
-
-Check that `ABS_X` moves with the wheel and that the pedals move `ABS_Z` and `ABS_RZ`. Note which button numbers you want to name. If anything differs, copy the profile and adjust it.
-
-```bash
-sudo cp udev/99-moza.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
-moza2keelson -e <vessel_id> --ffb off                                  # 1. inputs only
-moza2keelson -e <vessel_id> --ffb center --ffb-max-gain-pct 10         # 2. gentle centring; Ctrl-C leaves it limp
-moza2keelson -e <vessel_id> --ffb follow-up --ffb-rudder-max-deg 35    # 3. follow-up
-```
-
-## macOS
+## How macOS works
 
 The base speaks the standard USB HID force-feedback class (PID), the same one Linux's driver uses. On macOS the connector does the driver's part itself ([`hid_device.py`](moza_connector/hid_device.py)):
 
@@ -253,61 +317,11 @@ The base speaks the standard USB HID force-feedback class (PID), the same one Li
 - **Effect leases.** Linux erases a process's effects when it dies, even on `kill -9`; macOS doesn't. So every effect plays for **1 s** at a time and is re-started every 250 ms. If the connector stops for any reason, the wheel goes limp within a second.
 - **One program at a time.** The connector opens the base exclusively. Quit Pit House first.
 
-```bash
-uv sync --locked
-.venv/bin/moza2keelson -e <vessel_id> -p r21-ultra-no-pedals --ffb off                         # 1. inputs only
-.venv/bin/moza2keelson -e <vessel_id> -p r21-ultra-no-pedals --ffb center --ffb-max-gain-pct 10 # 2. gentle centring
-```
-
-### Quick start on macOS (copy into Terminal)
-
-Close Pit House first: it holds the base. Change `masslab-4` to your entity. Each block runs until you press Ctrl-C, so use one Terminal tab for each.
-
-Once, after cloning or pulling:
-
-```bash
-cd ~/Documents/CODE/keelson-connector-moza && uv sync --locked
-```
-
-The wheel. It starts again by itself 3 s after the base drops off USB, so replugging the base (or switching it back on) brings it back:
-
-```bash
-cd ~/Documents/CODE/keelson-connector-moza && while true; do .venv/bin/moza2keelson --mode client --connect tcp/localhost:7447 -r rise -e masslab-4 -p r21-ultra-no-pedals --ffb-remote --ffb-max-gain-pct 15 --base-serial auto; echo "moza2keelson exited ($?), restarting in 3 s"; sleep 3; done
-```
-
-The simulated rudder, steered by the wheel (only for testing without a vessel):
-
-```bash
-cd ~/Documents/CODE/keelson-connector-moza && .venv/bin/moza-rudder-sim --mode client --connect tcp/localhost:7447 -e masslab-4 --hull road-ferry-78m
-```
-
-Stop either with Ctrl-C: the wheel goes limp and the base's own angle and lights are put back. In Crowsnest, set the Hardware controllers page's entity to the same `masslab-4`. Force feedback starts off; switch it on there.
-
-### Keep it running on macOS
-
-The connector exits when the base drops off USB (code 3), by design. On Linux the container's restart policy brings it back; on macOS a LaunchAgent does:
-
-```bash
-scripts/install-macos-agents.sh -e <vessel_id> --with-sim     # connector (--ffb-remote, no pedals) and the rudder sim
-scripts/install-macos-agents.sh -e <vessel_id> -- -p r21-ultra --ffb-remote --ffb-max-gain-pct 20   # your own flags
-scripts/install-macos-agents.sh --uninstall
-```
-
-launchd restarts a program that fails (exit 3 or 1) after 3 s, but not one stopped cleanly. Logs go to `~/Library/Logs/moza2keelson.log` and `~/Library/Logs/moza-rudder-sim.log`.
-
-## Running
-
-The example below uses Docker on a Linux host. Edit `<vessel_id>` in [`docker-compose.moza.yml`](docker-compose.moza.yml) first.
-
-```bash
-docker compose -f docker-compose.moza.yml up -d
-```
-
-To run it natively:
+## Running natively, exit codes and options
 
 ```bash
 uv sync --locked
-.venv/bin/moza2keelson -e <vessel_id>    # or: .venv/bin/python bin/moza2keelson.py
+.venv/bin/moza2keelson -e <entity>    # or: .venv/bin/python bin/moza2keelson.py
 ```
 
 The connector exits with one of these codes:
@@ -361,10 +375,6 @@ usage: moza2keelson [-h] [--log-level LOG_LEVEL] [--mode {peer,client}]
 
 Run `moza2keelson --help` for the full list of options and their defaults.
 
-## The keelson pin
-
-keelson is pinned **exactly** (`keelson==0.6.0rc19`, which is tag `0.6.0-pre.19`) in [`pyproject.toml`](pyproject.toml) and `uv.lock`. Never point it at a path or a local build. To move it, change the pin and run `uv lock`.
-
 ## Development
 
 ```bash
@@ -380,6 +390,10 @@ docker run --rm --privileged -u root -v /dev:/dev -v "$PWD/scripts":/t:ro keelso
 
 The uinput check exercises discovery, absinfo, events, and effect upload, update, erase and gain against the kernel's force-feedback layer. It does not test the Moza firmware itself; only the hardware steps under "First run on a new base" do that.
 
-## Not yet
+## The keelson pin
 
-- **Base settings over Moza's serial protocol** (`/dev/ttyACM*`): rotation range, strength, temperatures. This would be reimplemented from the protocol notes in Boxflat. Boxflat is GPL-3.0, so its code must not be copied into this Apache-2.0 repo.
+keelson is pinned **exactly** (`keelson==0.6.0rc19`, which is tag `0.6.0-pre.19`) in [`pyproject.toml`](pyproject.toml) and `uv.lock`. Never point it at a path or a local build. To move it, change the pin and run `uv lock`.
+
+## License and acknowledgements
+
+Apache-2.0 (see [LICENSE](LICENSE)). The base's serial framing (`serial_proto.py`) was written from the protocol notes of [Boxflat](https://github.com/Lawstorant/boxflat) and checked against a live R21 Ultra. Boxflat is GPL-3.0; none of its code is copied here. Moza, Pit House and the product names are Moza Racing's.

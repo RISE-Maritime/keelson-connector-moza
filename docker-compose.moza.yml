@@ -1,4 +1,4 @@
-# A Moza wheelbase as the helm of <vessel_id>. Linux host only: the base is a USB device
+# A Moza wheelbase as the helm of <entity>. Linux host only: the base is a USB device
 # the container reads through the kernel (hid-universal-pidff, kernel >= 6.15). Install
 # udev/99-moza.rules on the host first: it creates /dev/moza-base.
 services:
@@ -13,4 +13,4 @@ services:
       - /dev/moza-base:/dev/input/moza-base
     group_add:
       - input
-    command: "moza2keelson -r rise -e <vessel_id> -d /dev/input/moza-base --ffb follow-up --ffb-max-gain-pct 30"
+    command: "moza2keelson -r rise -e <entity> -d /dev/input/moza-base --ffb follow-up --ffb-max-gain-pct 30"
