@@ -18,6 +18,12 @@
   </array>
   <key>WorkingDirectory</key>
   <string>@REPO@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Lines reach the log as they are written, not when Python's buffer fills. -->
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

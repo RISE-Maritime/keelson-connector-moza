@@ -259,6 +259,30 @@ uv sync --locked
 .venv/bin/moza2keelson -e <vessel_id> -p r21-ultra-no-pedals --ffb center --ffb-max-gain-pct 10 # 2. gentle centring
 ```
 
+### Quick start on macOS (copy into Terminal)
+
+Close Pit House first: it holds the base. Change `masslab-4` to your entity. Each block runs until you press Ctrl-C, so use one Terminal tab for each.
+
+Once, after cloning or pulling:
+
+```bash
+cd ~/Documents/CODE/keelson-connector-moza && uv sync --locked
+```
+
+The wheel. It starts again by itself 3 s after the base drops off USB, so replugging the base (or switching it back on) brings it back:
+
+```bash
+cd ~/Documents/CODE/keelson-connector-moza && while true; do .venv/bin/moza2keelson --mode client --connect tcp/localhost:7447 -r rise -e masslab-4 -p r21-ultra-no-pedals --ffb-remote --ffb-max-gain-pct 15 --base-serial auto; echo "moza2keelson exited ($?), restarting in 3 s"; sleep 3; done
+```
+
+The simulated rudder, steered by the wheel (only for testing without a vessel):
+
+```bash
+cd ~/Documents/CODE/keelson-connector-moza && .venv/bin/moza-rudder-sim --mode client --connect tcp/localhost:7447 -e masslab-4 --hull road-ferry-78m
+```
+
+Stop either with Ctrl-C: the wheel goes limp and the base's own angle and lights are put back. In Crowsnest, set the Hardware controllers page's entity to the same `masslab-4`. Force feedback starts off; switch it on there.
+
 ### Keep it running on macOS
 
 The connector exits when the base drops off USB (code 3), by design. On Linux the container's restart policy brings it back; on macOS a LaunchAgent does:
